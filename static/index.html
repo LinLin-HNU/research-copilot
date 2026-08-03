@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Research Copilot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .markdown-body h1, .markdown-body h2, .markdown-body h3 { font-weight: 600; margin-top: 1em; margin-bottom: 0.5em; }
+        .markdown-body h3 { font-size: 1.05rem; }
+        .markdown-body h2 { font-size: 1.1rem; }
+        .markdown-body h1 { font-size: 1.2rem; }
+        .markdown-body p { margin-bottom: 0.5em; }
+        .markdown-body ul { list-style: disc; padding-left: 1.5em; margin-bottom: 0.5em; }
+        .markdown-body ol { list-style: decimal; padding-left: 1.5em; margin-bottom: 0.5em; }
+        .markdown-body li { margin-bottom: 0.15em; }
+        .markdown-body strong { font-weight: 600; }
+        .markdown-body hr { margin: 0.75em 0; border-color: #e5e7eb; }
+        .markdown-body code { background: #f3f4f6; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; }
+        .markdown-body blockquote { border-left: 3px solid #d1d5db; padding-left: 1em; margin: 0.5em 0; color: #6b7280; }
+    </style>
+    <script src="https://gosspublic.alicdn.com/aliyun-oss-sdk-6.18.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body class="bg-gray-100 h-screen overflow-hidden">
+<div id="app" class="flex h-full">
+
+    <!-- ====== 左侧边栏 ====== -->
+    <aside class="w-72 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+        <div class="p-4 border-b border-gray-200">
+            <h1 class="text-lg font-bold text-gray-800 mb-3">📄 Research Copilot</h1>
+            <button id="new-chat-btn"
+                    class="w-full py-2.5 px-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-sm font-medium transition">
+                + 新会话
+            </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-2 space-y-1" id="session-list"></div>
+    </aside>
+
+    <!-- ====== 右侧主区域 ====== -->
+    <main class="flex-1 flex flex-col bg-white">
+
+        <!-- 聊天消息区 -->
+        <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-area">
+            <div class="h-full flex items-center justify-center text-gray-400">
+                <p id="empty-hint">上传一篇论文 PDF，AI 自动生成结构化摘要<br>或选择左侧历史会话继续讨论</p>
+            </div>
+        </div>
+
+        <!-- 底部输入区 -->
+        <div class="border-t border-gray-200 p-4 bg-white">
+            <div id="file-preview" class="hidden mb-2 relative"></div>
+            <div class="flex items-start gap-2">
+                <button id="upload-btn" class="p-2.5 text-gray-500 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition mt-1" title="上传论文 PDF">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                    </svg>
+                </button>
+                <input id="file-input" type="file" accept=".pdf" class="hidden">
+                <textarea id="text-input" rows="2"
+                    placeholder="输入关于论文的问题，或直接发送让 AI 分析..."
+                    class="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent text-sm resize-none"></textarea>
+                <button id="send-btn"
+                        class="py-2.5 px-6 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-300 text-white rounded-lg text-sm font-medium transition disabled:cursor-not-allowed mt-1">
+                    发送
+                </button>
+            </div>
+        </div>
+    </main>
+</div>
+
+<script>
+// ============================ 全局状态 ============================
+let state = {
+    currentThreadId: null,
+    messages: [],
+    sessions: [],
+    fileUrl: '',
+    fileType: '',
+    fileName: '',
+    isStreaming: false,
+};
+
+// ============================ DOM 引用 ============================
+const $ = id => document.getElementById(id);
+const chatArea = $('chat-area');
+const sessionList = $('session-list');
+const textInput = $('text-input');
+const sendBtn = $('send-btn');
+const uploadBtn = $('upload-btn');
+const fileInput = $('file-input');
+const filePreview = $('file-preview');
+const newChatBtn = $('new-chat-btn');
+
+// ============================ 工具函数 ============================
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatTime(isoStr) {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    return `${d.getMonth()+1}/${d.getDate()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+}
+
+// ============================ API 调用 ============================
+async function fetchHistory() {
+    const res = await fetch('/history');
+    const data = await res.json();
+    state.sessions = data.sessions || [];
+    renderSidebar();
+}
+
+async function fetchMessages(threadId) {
+    const res = await fetch(`/chat/${threadId}/messages`);
+    state.messages = await res.json();
+}
+
+async function deleteSession(threadId) {
+    if (!confirm('确定删除此会话？')) return;
+    await fetch(`/history/${threadId}`, { method: 'DELETE' });
+    if (state.currentThreadId === threadId) {
+        state.currentThreadId = null;
+        state.messages = [];
+        clearFile();
+    }
+    await fetchHistory();
+    renderMessages();
+}
+
+async function fetchOssToken() {
+    const res = await fetch('/oss/token');
+    return await res.json();
+}
+
+// ============================ 文件上传到 OSS ============================
+async function uploadToOSS(file) {
+    try {
+        const token = await fetchOssToken();
+        const client = new OSS({
+            region: token.region,
+            accessKeyId: token.access_key_id,
+            accessKeySecret: token.access_key_secret,
+            stsToken: token.security_token,
+            bucket: token.bucket,
+            endpoint: token.endpoint,
+        });
+        const fileName = `papers/${Date.now()}_${file.name}`;
+        const result = await client.put(fileName, file);
+        let url = result.url;
+        if (url.startsWith('http://')) url = url.replace('http://', 'https://');
+        return url;
+    } catch (err) {
+        console.error('OSS upload failed:', err);
+        alert('文件上传失败，请重试');
+        return null;
+    }
+}
+
+function clearFile() {
+    state.fileUrl = '';
+    state.fileType = '';
+    state.fileName = '';
+    filePreview.classList.add('hidden');
+    filePreview.innerHTML = '';
+}
+
+// ============================ 发送消息（SSE 流式）============================
+async function sendMessage() {
+    const text = textInput.value.trim();
+    if (!text && !state.fileUrl) return;
+    if (state.isStreaming) return;
+
+    const userContent = text || (state.fileUrl ? '请帮我分析这篇论文' : '');
+    if (!userContent) return;
+
+    state.isStreaming = true;
+    sendBtn.disabled = true;
+    sendBtn.textContent = '分析中...';
+    textInput.disabled = true;
+
+    // 添加用户消息到界面
+    const userMsg = { role: 'user', content: userContent };
+    if (state.fileUrl) userMsg.image_url = state.fileUrl;
+    if (state.fileType) userMsg.file_type = state.fileType;
+    if (state.fileName) userMsg.file_name = state.fileName;
+    state.messages.push(userMsg);
+    renderMessages();
+    textInput.value = '';
+
+    // 添加 AI 占位
+    state.messages.push({ role: 'assistant', content: '' });
+    const aiMsgIndex = state.messages.length - 1;
+    renderMessages();
+    scrollToBottom();
+
+    try {
+        const response = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                thread_id: state.currentThreadId || '',
+                user_text: userContent,
+                image_url: state.fileUrl || '',
+                file_type: state.fileType || '',
+            }),
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split('\n\n');
+            buffer = events.pop() || '';
+
+            for (const event of events) {
+                const lines = event.split('\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.type === 'thread_id') {
+                                state.currentThreadId = data.thread_id;
+                            } else if (data.type === 'content') {
+                                state.messages[aiMsgIndex].content += data.content;
+                                updateLastMessage();
+                                scrollToBottom();
+                            }
+                        } catch(e) {}
+                    }
+                }
+            }
+        }
+
+        await fetchHistory();
+        clearFile();
+
+    } catch (err) {
+        console.error('Chat error:', err);
+        state.messages[aiMsgIndex].content = '抱歉，请求出错了，请重试。';
+        updateLastMessage();
+    } finally {
+        state.isStreaming = false;
+        sendBtn.disabled = false;
+        sendBtn.textContent = '发送';
+        textInput.disabled = false;
+        textInput.focus();
+    }
+}
+
+function updateLastMessage() {
+    const msgDivs = chatArea.querySelectorAll('.message-bubble');
+    const lastMsgDiv = msgDivs[msgDivs.length - 1];
+    if (lastMsgDiv) {
+        lastMsgDiv.innerHTML = renderMessageContent(state.messages[state.messages.length - 1]);
+    }
+}
+
+function scrollToBottom() {
+    chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+// ============================ 渲染函数 ============================
+function renderMessageContent(msg) {
+    let html = '';
+
+    // 用户消息中的文件（PDF 或图片）
+    if (msg.role === 'user' && msg.image_url) {
+        if (msg.file_type === 'pdf') {
+            html += `<div class="flex items-center gap-2 mb-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 text-sm">
+                <span>📄</span>
+                <span class="text-indigo-800 truncate">${escapeHtml(msg.file_name || '论文 PDF')}</span>
+            </div>`;
+        } else {
+            html += `<img src="${escapeHtml(msg.image_url)}" class="max-w-[200px] rounded-lg mb-2 border border-gray-200">`;
+        }
+    }
+
+    let text = msg.content || '';
+    if (typeof text !== 'string') text = JSON.stringify(text);
+    if (text) {
+        const rendered = marked.parse(text, { async: false });
+        html += `<div class="text-sm leading-relaxed markdown-body">${rendered}</div>`;
+    }
+    return html;
+}
+
+function renderMessages() {
+    if (state.messages.length === 0) {
+        chatArea.innerHTML = `<div class="h-full flex items-center justify-center text-gray-400"><p id="empty-hint">上传一篇论文 PDF，AI 自动生成结构化摘要<br>或选择左侧历史会话继续讨论</p></div>`;
+        return;
+    }
+
+    let html = '';
+    for (const msg of state.messages) {
+        if (msg.role === 'user') {
+            html += `
+                <div class="flex justify-end message-bubble">
+                    <div class="max-w-[75%] bg-indigo-50 border border-indigo-200 rounded-2xl rounded-tr-md px-4 py-3">
+                        ${renderMessageContent(msg)}
+                    </div>
+                </div>`;
+        } else {
+            html += `
+                <div class="flex justify-start message-bubble">
+                    <div class="max-w-[75%] bg-gray-50 border border-gray-200 rounded-2xl rounded-tl-md px-4 py-3">
+                        ${renderMessageContent(msg)}
+                    </div>
+                </div>`;
+        }
+    }
+    chatArea.innerHTML = html;
+    scrollToBottom();
+}
+
+function renderSidebar() {
+    if (state.sessions.length === 0) {
+        sessionList.innerHTML = `<p class="text-gray-400 text-sm text-center py-8">暂无历史会话</p>`;
+        return;
+    }
+
+    let html = '';
+    for (const s of state.sessions) {
+        const active = s.thread_id === state.currentThreadId ? 'bg-indigo-50 border-indigo-300' : 'hover:bg-gray-50 border-transparent';
+        html += `
+            <div class="session-item rounded-lg p-3 cursor-pointer border transition ${active}" data-thread-id="${s.thread_id}">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm font-medium text-gray-800 truncate">${escapeHtml(s.title)}</span>
+                    <button class="delete-btn text-gray-400 hover:text-red-500 text-xs p-1" data-thread-id="${s.thread_id}">✕</button>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">${formatTime(s.updated_at)}</p>
+            </div>`;
+    }
+    sessionList.innerHTML = html;
+
+    document.querySelectorAll('.session-item').forEach(el => {
+        el.addEventListener('click', async (e) => {
+            if (e.target.closest('.delete-btn')) return;
+            await loadSession(el.dataset.threadId);
+        });
+    });
+
+    document.querySelectorAll('.delete-btn').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteSession(el.dataset.threadId);
+        });
+    });
+}
+
+async function loadSession(threadId) {
+    state.currentThreadId = threadId;
+    await fetchMessages(threadId);
+    clearFile();
+    renderMessages();
+    renderSidebar();
+}
+
+// ============================ 新建会话 ============================
+function newChat() {
+    state.currentThreadId = null;
+    state.messages = [];
+    clearFile();
+    renderMessages();
+    renderSidebar();
+    textInput.value = '';
+    textInput.focus();
+}
+
+// ============================ 事件绑定 ============================
+
+sendBtn.addEventListener('click', sendMessage);
+textInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+newChatBtn.addEventListener('click', newChat);
+
+uploadBtn.addEventListener('click', () => {
+    fileInput.click();
+});
+
+fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    state.fileType = 'pdf';
+    state.fileName = file.name;
+
+    // PDF 预览：显示文件名
+    filePreview.innerHTML = `
+        <div class="relative inline-block">
+            <div class="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 text-sm pr-8">
+                <span>📄</span>
+                <span class="text-indigo-800">${escapeHtml(file.name)}</span>
+            </div>
+            <button id="remove-file" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 text-xs flex items-center justify-center hover:bg-red-600">✕</button>
+        </div>`;
+    filePreview.classList.remove('hidden');
+    document.getElementById('remove-file')?.addEventListener('click', () => {
+        clearFile();
+        fileInput.value = '';
+    });
+
+    // 上传到 OSS
+    const url = await uploadToOSS(file);
+    if (url) {
+        state.fileUrl = url;
+    }
+    fileInput.value = '';
+});
+
+// ============================ 自动调整 textarea 高度 ============================
+textInput.addEventListener('input', () => {
+    textInput.style.height = 'auto';
+    textInput.style.height = Math.min(textInput.scrollHeight, 150) + 'px';
+});
+
+// ============================ 初始化 ============================
+async function init() {
+    await fetchHistory();
+    if (state.sessions.length > 0) {
+        await loadSession(state.sessions[0].thread_id);
+    } else {
+        renderMessages();
+    }
+}
+
+init();
+</script>
+</body>
+</html>

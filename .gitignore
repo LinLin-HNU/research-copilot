@@ -1,0 +1,29 @@
+# 密钥与环境变量（绝不提交）
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 运行时数据（SQLite + ChromaDB 向量库）
+resources/
+*.db
+*.db-shm
+*.db-wal
+
+# 本地工具配置（Claude Code 等）
+.claude/
+
+# 私人规划文档
+构思
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+.DS_Store
