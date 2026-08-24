@@ -1,130 +1,118 @@
 # AI Research Copilot — 产品需求与系统设计
 
+> 状态：**V1 已验收通过**（US-1/2/3 三条用户故事全部满足）
+
 ## 一、产品定位
 
-一句话：**一个帮助研究生高效阅读、理解和分析学术论文的 AI 科研助手。**
+**一句话**：一个**证据绑定**的 AI 科研助手——上传一篇论文 PDF，AI 生成带【来源章节 + 原文引用】的结构化摘要，并基于论文原文证据回答追问。
 
 目标用户：研0/研一学生、需要大量读论文的科研人员。
 
-核心假设：研究人员不缺获取论文的渠道，缺的是**理解论文的效率**和**跨论文的知识关联**。
+核心假设：研究人员不缺获取论文的渠道，缺的是**理解论文的效率**和**回答的可信度**。
 
----
+**与"论文摘要助手"的本质区别**：普通 LLM 能总结，但会把「论文内容 / 模型训练知识 / 后续领域发展」混为一谈（幻觉）。本项目的核心价值不是"总结"，而是**让每个结论都能溯源到论文原文**（Grounded Generation / Evidence Grounding）。
 
-## 二、用户故事（V1）
+## 二、用户故事与验收结果
 
-| ID | 用户故事 | 验收标准 |
-|----|---------|---------|
-| US-1 | 上传一篇 PDF 论文，系统自动生成结构化摘要（研究问题 / 方法 / 实验 / 结论） | 上传后 30s 内看到摘要，结构完整 |
-| US-2 | 基于论文内容追问细节，如"为什么选这个方法？对比基线是什么？" | 回答引用论文具体章节，不凭空编造 |
-| US-3 | 关闭页面后回来，还能看到之前的论文和对话记录 | 会话列表保存，点击可恢复 |
+| ID | 用户故事 | 验收标准 | 状态 |
+|----|---------|---------|------|
+| US-1 | 上传一篇 PDF 论文，自动生成结构化摘要（研究问题/方法/实验/总结） | 摘要结构完整，结论带来源章节与页码 | ✅ |
+| US-2 | 基于论文内容追问细节 | 回答引用具体章节 + 页码 + 原文，不凭空编造 | ✅ |
+| US-3 | 关闭页面后回来，还能看到之前的论文和对话 | 会话列表保存，点击可恢复 | ✅ |
 
----
+## 三、V1 功能清单
 
-## 三、V1 功能列表
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| PDF 上传 | ✅ | 阿里云 OSS + STS 临时凭证，前端直传，后端只收 URL |
+| PDF 解析 | ✅ | PyMuPDF 逐行提取文本，按章节结构化 + **页码追踪** |
+| 结构化摘要 | ✅ | 四段式（概述/方法/实验/总结），逐条带来源与原文引用 |
+| 证据绑定问答 | ✅ | 检索文本作为唯一事实来源，一级事实强制引用原文 |
+| 会话记忆 | ✅ | LangGraph SqliteSaver + sessions 表 |
+| 流式输出 | ✅ | SSE 逐字推送 |
 
-| 功能 | 优先级 | 说明 |
-|------|--------|------|
-| PDF 上传 | P0 | 支持上传学术 PDF，存到 OSS |
-| PDF 解析 | P0 | PyMuPDF 提取文本，按章节结构化 |
-| 结构化摘要 | P0 | LLM 自动生成论文结构化分析 |
-| 论文问答 | P0 | 基于论文内容的对话式问答（RAG） |
-| 会话记忆 | P0 | SqliteSaver + sessions 表（复用 ChefMate） |
-| 流式输出 | P0 | SSE 逐字推送（复用 ChefMate） |
+## 四、核心机制：证据绑定（V1.5）
 
----
+三件事把"能总结的 LLM"变成"可信的科研助手"：
 
-## 四、系统架构（V1）
+### 1. 证据铁律（prompt 硬约束）
+- 检索文本是**唯一事实来源**，检索之外禁止编造
+- 一级事实（贡献/结构/实验数据/结论）必须带【来源章节】+【原文引用】，引用必须是检索结果中的原句
+- 论文未提及 → 明确回答"论文中未找到相关描述"，禁止用外部知识补全
+- 解释推导只标来源，不硬贴原文（分层引用，避免满屏引用）
 
-```
-用户操作                     后端                         数据/服务
-┌──────────┐   PDF上传    ┌──────────────┐   Embedding   ┌─────────┐
-│  前端     │  ─────────→ │ FastAPI       │ ───────────→ │ChromaDB │
-│ index.html│             │              │               └─────────┘
-│          │  ←── SSE ─── │ LangGraph     │   LLM 调用   ┌─────────┐
-│ Tailwind │              │ Agent + Tools │ ───────────→ │ 通义千问 │
-│ marked.js│              │ SqliteSaver   │              └─────────┘
-└──────────┘              │ OSS 下载      │
-                           │ PyMuPDF 解析  │
-                           └──────────────┘
-```
+### 2. 三类内容分层（研究 idea / 论文不足场景）
+- **A1** 论文明确表述的问题/局限：附来源 + 原文
+- **A2** 从论文设计推导的潜在问题：标注"（论文未明确提及，属从论文设计中推导）"
+- **B** 后续研究/领域背景：标注"（非论文内容，属领域背景）"
+- **C** 模型推断与建议：标注"（基于领域知识的推测）"
+- 严禁把 B/C/A2 伪装成论文原文
 
-### Agent 工具箱（V1）
+> 验证案例：问"Transformer 论文的不足"，模型将 Pre-LN 正确归入 B 类并标注"非论文内容"，未冒充论文观点。
 
-Agent 有 3 个工具可用：
+### 3. 页码级溯源
+- 解析时逐行记录页码 → 每个 chunk 携带 `page_start` / `page_end`
+- 证据块格式：`【证据 #2 | 来源: Method | 第 1-2 页】`
+- 局限：页码为 **PDF 物理页码**，对带封面的期刊 PDF 可能有 1-2 页偏移（留 V2 校正）
 
-1. **`retrieve_paper_content`** — RAG 检索工具，从 ChromaDB 查论文相关内容
-2. **`get_paper_structure`** — 获取论文章节结构
-3. **`search_web`** — Tavily 搜索（可选，用于搜索论文学术背景）
-
----
-
-## 五、PDF 解析策略
+## 五、系统架构
 
 ```
-PyMuPDF 提取原始文本
-    │
-    ▼
-按学术论文关键词分段：
-  Abstract | Introduction | Related Work |
-  Method | Experiment | Result | Conclusion
-    │
-    ▼
-每段为一个 chunk，保留 metadata：
-  { paper_title, section, page_num, chunk_index }
-    │
-    ▼
-Embedding → 存入 ChromaDB
+用户操作                       后端                         数据/服务
+┌──────────┐  PDF→OSS       ┌──────────────┐  Embedding   ┌─────────┐
+│ 前端      │  STS 直传      │ FastAPI       │ ───────────→ │ChromaDB │
+│ index.html│  ──────────→  │              │               └─────────┘
+│          │  ←── SSE ────  │ LangGraph     │  LLM 调用   ┌─────────┐
+│          │                │ Agent + Tool  │ ───────────→ │ 通义千问 │
+└──────────┘                │ SqliteSaver   │              └─────────┘
+                            │ 页码解析链路   │
+                            └──────────────┘
 ```
 
-关键决策：**不跨章节切片**。整个 Abstract 作为一个 chunk，整个 Method 作为一个 chunk。超出 512 token 的章节按段落拆。
+PDF 处理链路：
 
----
+```
+OSS URL → PyMuPDF 逐页提文本 → 行→页码映射 → 章节检测（带页码范围）
+→ 章节切块（≤1500字符，带 page_start/page_end）
+→ Embedding（≤20条/批，自动分批）
+→ ChromaDB 存储 → 检索召回 top-5 → 证据块【证据#N | 来源 | 页码】→ LLM
+```
 
-## 六、V1 实施步骤
+## 六、关键技术决策（ADR）
 
-### Step 1：项目骨架（今天就做）
-- 创建 `Research_Copilot/` 目录
-- 从 ChefMate 复制：`config.py`、`database.py`、`schema.py`、`oss_sts.py`
-- 新增：`prompts.py`（论文分析 prompt）
-- 新增：`paper_parser.py`（PDF 解析 + 章节提取）
-- 新增：`rag_store.py`（ChromaDB 封装）
-- 改造：`agent_setup.py`（改名为 create_research_agent）
-- 改造：`app.py`（/chat 端点适配 PDF 流程）
-- 改造：`static/index.html`（PDF 上传 + 论文聊天 UI）
+| 决策 | 结论 | 理由 |
+|------|------|------|
+| 为什么用 OSS？ | V1 保留 | 为 V2 多论文库持久化原始 PDF 铺路；简历/云集成谈资。**注意：OSS 不省时间（多一跳）也不省 token（PDF 从不进 LLM）**，对单篇一次性分析可直接 multipart 上传 |
+| 为什么 RAG 而非整篇喂？ | 章节切块 + 检索 | 省 token（10 页论文 ~5K token → 检索只喂 ~1K）；结论可溯源 |
+| embedding 分批 | ≤20 条/批 | DashScope 兼容接口硬限制，超限返回 400 |
+| 距离度量 | 默认 L2（ChromaDB） | V1 够用；如需余弦需在 collection metadata 显式声明 |
+| 召回 vs 重排 | 只召回 top-5 | 实测召回质量已满足；重排（cross-encoder）留 V1.5/V2 对症下药 |
+| Pydantic 模型 | 字段必须前后端对齐 | file_type 缺失曾导致 500，后端声明的字段才能收到前端参数 |
 
-### Step 2：PDF 解析 + RAG
-- 实现 paper_parser.py（PyMuPDF 文本提取 + 章节分割）
-- 实现 rag_store.py（ChromaDB 初始化 + 存储 + 检索）
-- 测试：上传一篇论文 → 解析成功 → 存入向量库
+## 七、路线图
 
-### Step 3：Agent + 前端联调
-- 写论文分析 prompt
-- Agent 调用 RAG 工具回答论文问题
-- 前端展示结构化摘要和对话
+- **V1（已完成）**：单篇论文理解（证据摘要 + 证据问答）
+- **V1.5（可选）**：重排、余弦距离、印刷页码偏移校正
+- **V2**：多论文知识库 + 跨论文对比（Literature Review Agent）
+  - 全局论文库管理、跨论文对比（表格）、文献综述生成
+  - 引入 LangGraph **workflow**（Planner→Retriever→Generator→Validator），不为多 Agent 而多 Agent
+- **V3**：Research Idea Agent
+  - 研究 idea 生成 → arXiv 检索 → 已有工作匹配 → 创新空间分析 → Proposal
 
----
+## 八、项目结构
 
-## 七、ChefMate 复用清单
-
-| 模块 | 复用方式 | 改动量 |
-|------|---------|-------|
-| `config.py` | 直接复制，去掉 Tavily | 删 3 行 |
-| `database.py` | 复制，改 DB 路径 | 改 1 行 |
-| `schema.py` | 直接复制 | 0 行 |
-| `oss_sts.py` | 复制，改 session 名 | 改 1 行 |
-| `app.py` 框架 | 复制后改造 /chat | 中等改动 |
-| `agent_setup.py` | 复制后重命名 + 换工具 | 小改动 |
-| `static/index.html` | 改造 UI | 大改动 |
-| OSS 前端上传 | 复用 uploadToOSS | OSS 路径改 papers/ |
-
----
-
-## 八、不做的事（V1 明确不做的）
-
-- ❌ 多论文对比
-- ❌ 论文库管理（上传多篇）
-- ❌ 文献综述生成
-- ❌ 公式/图表识别
-- ❌ 论文推荐
-
-这些放 V2/V3。
+```
+Research_Copilot/
+├── app.py              ← FastAPI 入口，SSE 流式 /chat + 历史接口
+├── config.py           ← 通义千问模型配置
+├── agent_setup.py      ← create_agent + retrieve_paper 工具（证据块格式化）
+├── paper_parser.py     ← PDF 解析 + 章节检测 + 页码追踪 + 切块
+├── rag_store.py        ← ChromaDB 封装（embedding 分批 / 检索）
+├── prompts.py          ← 证据铁律 + 三类分层的系统提示词
+├── database.py         ← sessions 表管理
+├── schemas.py          ← Pydantic 数据模型
+├── oss_sts.py          ← 阿里云 STS 临时凭证
+├── static/index.html   ← 前端页面
+├── resources/          ← SQLite + ChromaDB 持久化目录
+└── PRD.md / README.md
+```

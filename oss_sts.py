@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 from aliyunsdkcore.client import AcsClient
 from aliyunsdksts.request.v20150401 import AssumeRoleRequest
 
+
+"""！！！！！    OSS上传是否有必要，直接传输是否效率更高，因为目前OSS只上传原始文档，并未做任何处理"""
 load_dotenv(override=True)
 #使用永久密钥向阿里云请求临时令牌
 #返回临时 AccessKeyId,AccessKeySecret,SecurityToken，以及bucket信息

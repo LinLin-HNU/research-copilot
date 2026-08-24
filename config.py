@@ -8,7 +8,7 @@ load_dotenv(Path(__file__).parent / '.env')
 
 #========================配置通义千问模型 ===================
 model=init_chat_model(
-    "qwen3.7-plus",
+    "qwen3.7-flash-2026-07-15",
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url=os.getenv("DASHSCOPE_BASE_URL"),
     model_provider="openai",
