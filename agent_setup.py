@@ -1,66 +1,72 @@
 """
 Agent 设置模块
-创建 Research Copilot Agent，包含 RAG 检索工具
+创建 Research Copilot Agent。
+
+架构说明（token 治理）：
+- 论文证据由后端 Python 预检索（app.build_evidence），通过 LangGraph runtime
+  context（RequestContext）传入，再由 @dynamic_prompt 中间件拼进「系统提示」。
+- 证据只在当轮发给模型，**不写进 messages，因此不会进 SqliteSaver 历史**，
+  从根上避免大段检索原文跨轮重发（token 线性膨胀）以及换论文后旧证据残留。
+- Agent 自身不注册任何检索工具：检索是确定性的，后端做完即可，模型只负责
+  基于当轮证据综合与表达。
 """
 import sqlite3
+from dataclasses import dataclass
+
 from langchain.agents import create_agent
-from langchain.tools import tool
+from langchain.agents.middleware import dynamic_prompt
 from langgraph.checkpoint.sqlite import SqliteSaver
+
 from config import model
 from prompts import get_system_prompt
-from rag_store import get_rag
-
-# 当前会话的 thread_id（工具通过此变量获取上下文）
-_current_thread_id = [""]
-
-# 每个会话本轮已展示给模型的 chunk ID，避免同一 chunk 被反复检索重发
-_seen_chunks: dict[str, set[str]] = {}
 
 
-@tool
-def retrieve_paper(query: str) -> str:
+@dataclass
+class RequestContext:
+    """单次请求级数据：仅本轮使用，永不写入 checkpoint 消息历史。"""
+    evidence: str = ""
+    guidance: str = ""
+
+
+@dynamic_prompt
+def request_prompt(request) -> str:
+    """每轮动态系统提示 = 基础人设/铁律 + 本轮要求 + 本轮论文证据。
+
+    证据放这里而不是用户消息里，因此不会被持久化、不会跨轮重发。
     """
-    从当前已上传的论文中检索与问题相关的内容。
-    当用户提问涉及论文具体内容时，必须调用此工具。
-    """
-    tid = _current_thread_id[0]
-    if not tid:
-        return "当前没有活跃的论文会话。"
-    rag = get_rag()
-    seen = _seen_chunks.setdefault(tid, set())
-    results = rag.search(tid, query, k=5, exclude_ids=seen)
-    if not results:
-        return "论文库中未找到相关内容。"
-    for r in results:
-        if r.get("id"):
-            seen.add(r["id"])
-    parts = []
-    for i, r in enumerate(results, 1):
-        section = r["section"].title()
-        content = r["content"][:600]
-        page = f" | 第 {r.get('page_start', 0)}-{r.get('page_end', 0)} 页" if r.get("page_end", 0) else ""
-        parts.append(f"【证据 #{i} | 来源: {section}{page}】\n{content}")
-    return "\n\n---\n\n".join(parts)
+    ctx = getattr(request.runtime, "context", None)
 
+    def _field(name: str) -> str:
+        if ctx is None:
+            return ""
+        if isinstance(ctx, dict):
+            return ctx.get(name, "") or ""
+        return getattr(ctx, name, "") or ""
 
-def set_current_thread(tid: str):
-    _current_thread_id[0] = tid
-
-
-def reset_retrieval_memory(tid: str):
-    """每次用户请求开始时清空该会话"已展示 chunk"记录，
-    让新一轮问答的检索从头开始、不排除任何 chunk。"""
-    _seen_chunks.pop(tid, None)
+    prompt = get_system_prompt()
+    guidance = _field("guidance")
+    evidence = _field("evidence")
+    if guidance:
+        prompt += f"\n\n【本轮回答要求】\n{guidance}"
+    if evidence:
+        prompt += (
+            "\n\n【本轮论文证据】以下证据仅供本轮使用，不会保留到后续对话，"
+            "请只基于这些证据陈述论文事实，并按证据中标注的来源章节/页码引用：\n\n"
+            f"{evidence}"
+        )
+    return prompt
 
 
 def create_research_agent():
+    # 相对路径：需在 Research_Copilot 目录下运行
     connection = sqlite3.connect("resources/research_copilot.db", check_same_thread=False)
     checkpointer = SqliteSaver(connection)
     checkpointer.setup()
 
     return create_agent(
         model,
-        tools=[retrieve_paper],
-        system_prompt=get_system_prompt(),
+        tools=[],
+        middleware=[request_prompt],
+        context_schema=RequestContext,
         checkpointer=checkpointer,
     )

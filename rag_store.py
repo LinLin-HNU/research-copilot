@@ -99,6 +99,7 @@ class PaperRAG:
 
         流程：先召回 pool 个候选（扩大召回面）→ 排除已展示过的 exclude_ids →
         用 MMR 在"相关度"与"多样性"间折中，挑出 k 个，避免同一 chunk 被反复返回重发。
+        目标：只把最有用的、不重复的少量文本喂给大模型
         """
         collection = self.client.get_or_create_collection(f"paper_{thread_id}")
         total = collection.count()

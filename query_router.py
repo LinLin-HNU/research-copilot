@@ -44,7 +44,14 @@ def _parse_category(text: str) -> str:
 def classify_question(text: str) -> str:
     """一次廉价 LLM 调用，返回 A1/A2/B/C。任何异常回退 A1。"""
     try:
-        resp = model.bind(temperature=0, max_tokens=50).invoke(
+        # qwen3 flash 默认开启思考模式，空 reasoning 会占满 max_tokens 导致分类 JSON
+        # 还没输出就被截断（返回空串 → 全部兜底成 A1，路由形同虚设）。
+        # 必须 enable_thinking=False，让这次调用直接产出分类 JSON。
+        resp = model.bind(
+            temperature=0,
+            max_tokens=100,
+            extra_body={"enable_thinking": False},
+        ).invoke(
             [SystemMessage(content=ROUTER_PROMPT), HumanMessage(content=f"用户问题：{text}")]
         )
         content = resp.content if isinstance(resp.content, str) else str(resp.content)
