@@ -27,8 +27,8 @@ from query_router import classify_question, build_route
 from rag_store import PaperRAG
 from app import build_evidence, route_user_question, SUMMARY_QUERIES
 
-# 一个真实、只读的论文集合（Attention，8 chunks），用于检索类验证
-REAL_THREAD = "1180d5b2-617e-4bf1-891c-6b45eb21e70a"
+# 一个真实、只读的论文集合（Transformers SSMs，41 chunks），用于检索类验证
+REAL_THREAD = "3c2d6b6d-c9bc-4c37-9bbe-312065bd0928"
 
 TMP_DIR = Path("resources/_verify_tmp")
 TMP_DB = TMP_DIR / "checkpoints.db"

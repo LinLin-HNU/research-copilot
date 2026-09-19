@@ -139,6 +139,28 @@ class PaperRAG:
         chosen = _mmr_select(query_vec, cand_vecs, k, mmr_lambda)
         return [candidates[i] for i in chosen]
 
+    def list_chunks(self, thread_id: str) -> list[dict]:
+        """按（起始页、入库顺序）列出集合内全部 chunk，供结构化兜底选用。
+
+        向量检索依赖查询与文本的用词匹配，遇到章节命名非标准的论文（如综述）
+        容易召回稀疏；这里直接按文档结构取块作为补充。
+        """
+        collection = self.client.get_or_create_collection(f"paper_{thread_id}")
+        data = collection.get(include=["documents", "metadatas"])
+        rows = []
+        for cid, doc, md in zip(data["ids"], data["documents"], data["metadatas"]):
+            order = int(cid.rsplit("_", 1)[-1]) if "_" in cid else 0
+            rows.append({
+                "id": cid,
+                "content": doc,
+                "section": md.get("section", "unknown"),
+                "page_start": md.get("page_start", 0),
+                "page_end": md.get("page_end", 0),
+                "_order": order,
+            })
+        rows.sort(key=lambda r: (r.get("page_start", 0) or 0, r["_order"]))
+        return rows
+
     def delete_collection(self, thread_id: str) -> None:
         """删除某个会话的论文向量"""
         try:

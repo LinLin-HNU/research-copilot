@@ -2,6 +2,10 @@
 PDF 论文解析模块
 使用 PyMuPDF 提取文本，按学术论文章节结构分割
 """
+from collections import Counter
+import math
+import re
+
 import fitz
 
 # 常见学术论文章节关键词（按优先级排序）
@@ -30,63 +34,127 @@ SECTION_KEYWORDS = [
 ]
 
 
+def _normalise_margin_line(text: str) -> str:
+    text = re.sub(r"\d+", "#", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def extract_text_from_bytes(data: bytes) -> tuple[str, list[int]]:
-    """从 PDF 提取全文，并返回每一行所在的页码（从 1 开始）"""
+    """Extract PDF text while removing repeated top and bottom margin noise."""
     doc = fitz.open(stream=data, filetype="pdf")
-    all_lines = []
-    line_pages = []
-    for page_idx, page in enumerate(doc):
-        for line in page.get_text().split("\n"):
+    pages: list[list[tuple[str, bool]]] = []
+    margin_counts: Counter[str] = Counter()
+
+    try:
+        for page in doc:
+            page_height = page.rect.height or 1
+            page_lines: list[tuple[str, bool]] = []
+            page_margin_lines = set()
+            for block in page.get_text("blocks"):
+                x0, y0, _x1, y1, block_text, _block_no, block_type = block
+                if block_type != 0:
+                    continue
+                in_margin = y0 <= page_height * 0.12 or y1 >= page_height * 0.88
+                for line in block_text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    page_lines.append((line, in_margin))
+                    if in_margin:
+                        normalised = _normalise_margin_line(line)
+                        if len(normalised) >= 3:
+                            page_margin_lines.add(normalised)
+                page_lines.append(("", False))
+            margin_counts.update(page_margin_lines)
+            pages.append(page_lines)
+    finally:
+        doc.close()
+
+    repeated_threshold = max(3, math.ceil(len(pages) * 0.5))
+    repeated_margin_lines = {
+        line for line, count in margin_counts.items() if count >= repeated_threshold
+    }
+    all_lines: list[str] = []
+    line_pages: list[int] = []
+    for page_number, page_lines in enumerate(pages, start=1):
+        for line, in_margin in page_lines:
+            if in_margin and _normalise_margin_line(line) in repeated_margin_lines:
+                continue
             all_lines.append(line)
-            line_pages.append(page_idx + 1)
-    doc.close()
+            line_pages.append(page_number)
     return "\n".join(all_lines), line_pages
 
 
-def detect_sections(text: str, line_pages: list[int] | None = None) -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
+def _canonical_section_key(section: str, occurrence: int) -> str:
+    return f"{section}@@{occurrence}"
+
+
+def _section_from_key(section_key: str) -> str:
+    return section_key.rsplit("@@", 1)[0]
+
+
+def _heading_keyword(text: str) -> str | None:
+    candidate_text = re.sub(
+        r"^(?:\d+(?:\.\d+)*|[ivxlcdm]+)[.)]?\s+", "", text.strip()
+    )
+    if candidate_text.endswith((".", ";", ",")):
+        return None
+    candidate = candidate_text.lower().rstrip(":")
+    if len(candidate) > 120:
+        return None
+    for keyword in SECTION_KEYWORDS:
+        if candidate == keyword or candidate.startswith(f"{keyword} "):
+            return keyword
+    return None
+
+
+def detect_sections(
+    text: str,
+    line_pages: list[int] | None = None,
+) -> tuple[dict[str, str], dict[str, list[int]]]:
     """
     按章节关键词分割论文文本。
     返回: ( {section_name: content}, {section_name: (start_page, end_page)} )
     """
     lines = text.split("\n")
-    sections = {}
-    section_pages = {}
+    sections: dict[str, str] = {}
+    section_pages: dict[str, list[int]] = {}
     current_section = "preamble"
     current_lines = []
-    section_start_line = 0
+    current_line_pages: list[int] = []
+    occurrences: Counter[str] = Counter()
 
     def flush():
-        content = "\n".join(current_lines).strip()
-        if content:
-            sections[current_section] = content
-            if line_pages is not None and current_lines:
-                start = line_pages[section_start_line]
-                end = line_pages[section_start_line + len(current_lines) - 1]
-                section_pages[current_section] = (start, end)
+        first = 0
+        last = len(current_lines)
+        while first < last and not current_lines[first].strip():
+            first += 1
+        while last > first and not current_lines[last - 1].strip():
+            last -= 1
+        content_lines = current_lines[first:last]
+        if content_lines:
+            occurrences[current_section] += 1
+            key = _canonical_section_key(current_section, occurrences[current_section])
+            sections[key] = "\n".join(content_lines)
+            section_pages[key] = current_line_pages[first:last]
 
     for idx, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
-            current_lines.append(line)      #如果是空行也依然保留，因为后续chunk_sections函数会根据双换行符\n\n来切分段落
-            continue                        #跳过当前判断，因为当前是按行遍历，空行不可能是一个章节标题，所以直接跳过本轮循环，进入下一行
+            current_lines.append(line)
+            current_line_pages.append(line_pages[idx] if line_pages else 0)
+            continue
 
-        lower = stripped.lower().rstrip(".:")
-        matched = None
-        for keyword in SECTION_KEYWORDS:
-            # 匹配章节标题：行首关键词，且行较短（标题特征）
-            """ ！！！！！    关于这个匹配规则，如果论文的标题不按常理怎么办，keyword这些关键词是包含在标题中，而不是在标题首部或只有一个简单的像“abstract”"""
-            if lower.startswith(keyword) or lower == keyword:
-                if len(stripped) < 100:  # 标题一般不超过100字符
-                    matched = keyword
-                    break
+        matched = _heading_keyword(stripped)
 
         if matched:                         #判断是否找到了新章节，如果当前matched不为None，说明当前行是一个新的章节标题
             flush()
-            current_section = matched       #更新当前章节标识：把当前章节名换成新匹配到的关键词
-            current_lines = [stripped]      #重置缓存：清空之间的行缓存，并将当前这个标题的行作为新章节的第一行加入缓存
-            section_start_line = idx        #记录新章节起始行号，用于推算页码范围
+            current_section = matched
+            current_lines = [stripped]
+            current_line_pages = [line_pages[idx] if line_pages else 0]
         else:
             current_lines.append(line)
+            current_line_pages.append(line_pages[idx] if line_pages else 0)
 
     flush()
     return sections, section_pages
@@ -94,7 +162,7 @@ def detect_sections(text: str, line_pages: list[int] | None = None) -> tuple[dic
 
 def chunk_sections(
     sections: dict[str, str],
-    section_pages: dict[str, tuple[int, int]] | None = None,
+    section_pages: dict[str, list[int]] | None = None,
     max_chars: int = 1500,
 ) -> list[dict]:
     """
@@ -104,32 +172,34 @@ def chunk_sections(
     """
     chunks = []             # chunk整体存的是一个如"abstract"这样的章节，其中有多个元素，元素是字典，键是”abstract"，值是一个或多个段落的内容
 
-    def with_page(chunk: dict) -> dict:
-        start = end = 0
-        if section_pages:
-            page_range = section_pages.get(chunk["section"])
-            if page_range:
-                start, end = page_range
-        chunk["page_start"] = start
-        chunk["page_end"] = end
-        return chunk
+    for section_key, content in sections.items():
+        pages = (section_pages or {}).get(section_key, [0] * len(content.split("\n")))
+        lines = content.split("\n")
+        if len(pages) != len(lines):
+            pages = [0] * len(lines)
+        current_lines: list[str] = []
+        current_pages: list[int] = []
 
-    for section_name, content in sections.items():
-        if len(content) <= max_chars:
-            chunks.append(with_page({"section": section_name, "content": content}))
-        else:
-            # 按段落拆分
-            paragraphs = content.split("\n\n")      #按照双换行符\n\n切分成多个段落并存入列表paragraphs
-            current = ""
-            for para in paragraphs:
-                if len(current) + len(para) <= max_chars:
-                    current += para + "\n\n"
-                else:
-                    if current.strip():
-                        chunks.append(with_page({"section": section_name, "content": current.strip()}))    #如果超过字符限制，就把它加入列表chunk当中，作为chunk中的一个元素
-                    current = para + "\n\n"
-            if current.strip():
-                chunks.append(with_page({"section": section_name, "content": current.strip()}))
+        def flush_chunk() -> None:
+            body = "\n".join(current_lines).strip()
+            if body:
+                known_pages = [page for page in current_pages if page]
+                chunks.append({
+                    "section": _section_from_key(section_key),
+                    "content": body,
+                    "page_start": min(known_pages) if known_pages else 0,
+                    "page_end": max(known_pages) if known_pages else 0,
+                })
+
+        for line, page in zip(lines, pages):
+            projected_size = len("\n".join(current_lines + [line]))
+            if current_lines and projected_size > max_chars:
+                flush_chunk()
+                current_lines = []
+                current_pages = []
+            current_lines.append(line)
+            current_pages.append(page)
+        flush_chunk()
     return chunks
 
 

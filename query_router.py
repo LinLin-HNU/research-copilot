@@ -49,7 +49,7 @@ def classify_question(text: str) -> str:
         # 必须 enable_thinking=False，让这次调用直接产出分类 JSON。
         resp = model.bind(
             temperature=0,
-            max_tokens=100,
+            max_tokens=50,
             extra_body={"enable_thinking": False},
         ).invoke(
             [SystemMessage(content=ROUTER_PROMPT), HumanMessage(content=f"用户问题：{text}")]

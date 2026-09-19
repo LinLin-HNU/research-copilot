@@ -1,118 +1,132 @@
-# AI Research Copilot — 产品需求与系统设计
+# AI Research Copilot
 
-> 状态：**V1 已验收通过**（US-1/2/3 三条用户故事全部满足）
+> V1.0 — a single-paper, evidence-grounded research reading assistant.
 
-## 一、产品定位
+Upload a PDF paper and receive a structured summary or follow-up answer whose paper facts are tied to retrieved source sections, PDF pages, and original excerpts. V1 is designed to make paper claims inspectable; it is not intended to replace reading a paper in full.
 
-**一句话**：一个**证据绑定**的 AI 科研助手——上传一篇论文 PDF，AI 生成带【来源章节 + 原文引用】的结构化摘要，并基于论文原文证据回答追问。
+## What V1 does
 
-目标用户：研0/研一学生、需要大量读论文的科研人员。
+- Upload one PDF per conversation through Alibaba Cloud OSS and temporary STS credentials.
+- Parse PDF text with PyMuPDF, remove repeated header/footer noise, detect common sections, and retain page ranges per chunk.
+- Generate a structured summary from bounded evidence.
+- Answer follow-up questions with paper-grounded evidence and explicit source labels.
+- Route questions into paper facts, paper limitations, general knowledge, or research reasoning.
+- Persist conversations locally with SQLite and vectors with ChromaDB.
+- Replace both vectors and conversation history when a new PDF is uploaded to the same conversation.
 
-核心假设：研究人员不缺获取论文的渠道，缺的是**理解论文的效率**和**回答的可信度**。
+## Evidence and token controls
 
-**与"论文摘要助手"的本质区别**：普通 LLM 能总结，但会把「论文内容 / 模型训练知识 / 后续领域发展」混为一谈（幻觉）。本项目的核心价值不是"总结"，而是**让每个结论都能溯源到论文原文**（Grounded Generation / Evidence Grounding）。
+V1 does not register a retrieval tool with the model. Retrieval happens in Python before generation and evidence is injected only into the current request prompt.
 
-## 二、用户故事与验收结果
+- Evidence never becomes a `ToolMessage` and is not persisted in checkpoint history.
+- A response is capped at 8 evidence blocks and 6000 characters of evidence.
+- Up to 6 blocks come from semantic retrieval; remaining capacity is used for section coverage.
+- Structural fallback reuses the same retrieval candidates and prefers semantically relevant chunks before page order.
+- Reference and appendix chunks are excluded from factual evidence.
+- General-knowledge questions bypass paper retrieval.
 
-| ID | 用户故事 | 验收标准 | 状态 |
-|----|---------|---------|------|
-| US-1 | 上传一篇 PDF 论文，自动生成结构化摘要（研究问题/方法/实验/总结） | 摘要结构完整，结论带来源章节与页码 | ✅ |
-| US-2 | 基于论文内容追问细节 | 回答引用具体章节 + 页码 + 原文，不凭空编造 | ✅ |
-| US-3 | 关闭页面后回来，还能看到之前的论文和对话 | 会话列表保存，点击可恢复 | ✅ |
+This keeps multi-turn token growth bounded: only normal user and assistant messages are retained, while paper excerpts are retrieved again when needed.
 
-## 三、V1 功能清单
+## Architecture
 
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| PDF 上传 | ✅ | 阿里云 OSS + STS 临时凭证，前端直传，后端只收 URL |
-| PDF 解析 | ✅ | PyMuPDF 逐行提取文本，按章节结构化 + **页码追踪** |
-| 结构化摘要 | ✅ | 四段式（概述/方法/实验/总结），逐条带来源与原文引用 |
-| 证据绑定问答 | ✅ | 检索文本作为唯一事实来源，一级事实强制引用原文 |
-| 会话记忆 | ✅ | LangGraph SqliteSaver + sessions 表 |
-| 流式输出 | ✅ | SSE 逐字推送 |
+```text
+Browser -> OSS upload -> FastAPI /chat
+                         |
+                         +-> PDF parser -> section chunks -> ChromaDB
+                         |
+                         +-> query router -> bounded evidence -> LangGraph agent
+                                                          |
+                                                          +-> SSE response
 
-## 四、核心机制：证据绑定（V1.5）
-
-三件事把"能总结的 LLM"变成"可信的科研助手"：
-
-### 1. 证据铁律（prompt 硬约束）
-- 检索文本是**唯一事实来源**，检索之外禁止编造
-- 一级事实（贡献/结构/实验数据/结论）必须带【来源章节】+【原文引用】，引用必须是检索结果中的原句
-- 论文未提及 → 明确回答"论文中未找到相关描述"，禁止用外部知识补全
-- 解释推导只标来源，不硬贴原文（分层引用，避免满屏引用）
-
-### 2. 三类内容分层（研究 idea / 论文不足场景）
-- **A1** 论文明确表述的问题/局限：附来源 + 原文
-- **A2** 从论文设计推导的潜在问题：标注"（论文未明确提及，属从论文设计中推导）"
-- **B** 后续研究/领域背景：标注"（非论文内容，属领域背景）"
-- **C** 模型推断与建议：标注"（基于领域知识的推测）"
-- 严禁把 B/C/A2 伪装成论文原文
-
-> 验证案例：问"Transformer 论文的不足"，模型将 Pre-LN 正确归入 B 类并标注"非论文内容"，未冒充论文观点。
-
-### 3. 页码级溯源
-- 解析时逐行记录页码 → 每个 chunk 携带 `page_start` / `page_end`
-- 证据块格式：`【证据 #2 | 来源: Method | 第 1-2 页】`
-- 局限：页码为 **PDF 物理页码**，对带封面的期刊 PDF 可能有 1-2 页偏移（留 V2 校正）
-
-## 五、系统架构
-
-```
-用户操作                       后端                         数据/服务
-┌──────────┐  PDF→OSS       ┌──────────────┐  Embedding   ┌─────────┐
-│ 前端      │  STS 直传      │ FastAPI       │ ───────────→ │ChromaDB │
-│ index.html│  ──────────→  │              │               └─────────┘
-│          │  ←── SSE ────  │ LangGraph     │  LLM 调用   ┌─────────┐
-│          │                │ Agent + Tool  │ ───────────→ │ 通义千问 │
-└──────────┘                │ SqliteSaver   │              └─────────┘
-                            │ 页码解析链路   │
-                            └──────────────┘
+SQLite stores sessions and checkpoints. ChromaDB stores one paper collection per thread.
 ```
 
-PDF 处理链路：
+## Quick start
 
+### 1. Create an environment and install dependencies
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
-OSS URL → PyMuPDF 逐页提文本 → 行→页码映射 → 章节检测（带页码范围）
-→ 章节切块（≤1500字符，带 page_start/page_end）
-→ Embedding（≤20条/批，自动分批）
-→ ChromaDB 存储 → 检索召回 top-5 → 证据块【证据#N | 来源 | 页码】→ LLM
+
+### 2. Configure environment variables
+
+Copy `.env.example` to `.env` and fill in your credentials. Do not commit `.env`.
+
+```bash
+copy .env.example .env
 ```
 
-## 六、关键技术决策（ADR）
+Required variables:
 
-| 决策 | 结论 | 理由 |
-|------|------|------|
-| 为什么用 OSS？ | V1 保留 | 为 V2 多论文库持久化原始 PDF 铺路；简历/云集成谈资。**注意：OSS 不省时间（多一跳）也不省 token（PDF 从不进 LLM）**，对单篇一次性分析可直接 multipart 上传 |
-| 为什么 RAG 而非整篇喂？ | 章节切块 + 检索 | 省 token（10 页论文 ~5K token → 检索只喂 ~1K）；结论可溯源 |
-| embedding 分批 | ≤20 条/批 | DashScope 兼容接口硬限制，超限返回 400 |
-| 距离度量 | 默认 L2（ChromaDB） | V1 够用；如需余弦需在 collection metadata 显式声明 |
-| 召回 vs 重排 | 只召回 top-5 | 实测召回质量已满足；重排（cross-encoder）留 V1.5/V2 对症下药 |
-| Pydantic 模型 | 字段必须前后端对齐 | file_type 缺失曾导致 500，后端声明的字段才能收到前端参数 |
+| Variable | Purpose |
+|---|---|
+| `DASHSCOPE_API_KEY` | DashScope-compatible chat and embedding API key |
+| `DASHSCOPE_BASE_URL` | API base URL used by chat and embedding requests |
+| `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | Server-side credentials used to obtain STS tokens |
+| `OSS_REGION` / `OSS_ROLE_ARN` | Alibaba Cloud STS configuration |
+| `OSS_BUCKET` / `OSS_ENDPOINT` | Browser upload target |
 
-## 七、路线图
+### 3. Run
 
-- **V1（已完成）**：单篇论文理解（证据摘要 + 证据问答）
-- **V1.5（可选）**：重排、余弦距离、印刷页码偏移校正
-- **V2**：多论文知识库 + 跨论文对比（Literature Review Agent）
-  - 全局论文库管理、跨论文对比（表格）、文献综述生成
-  - 引入 LangGraph **workflow**（Planner→Retriever→Generator→Validator），不为多 Agent 而多 Agent
-- **V3**：Research Idea Agent
-  - 研究 idea 生成 → arXiv 检索 → 已有工作匹配 → 创新空间分析 → Proposal
-
-## 八、项目结构
-
+```bash
+python -m uvicorn app:app --reload --port 8000
 ```
-Research_Copilot/
-├── app.py              ← FastAPI 入口，SSE 流式 /chat + 历史接口
-├── config.py           ← 通义千问模型配置
-├── agent_setup.py      ← create_agent + retrieve_paper 工具（证据块格式化）
-├── paper_parser.py     ← PDF 解析 + 章节检测 + 页码追踪 + 切块
-├── rag_store.py        ← ChromaDB 封装（embedding 分批 / 检索）
-├── prompts.py          ← 证据铁律 + 三类分层的系统提示词
-├── database.py         ← sessions 表管理
-├── schemas.py          ← Pydantic 数据模型
-├── oss_sts.py          ← 阿里云 STS 临时凭证
-├── static/index.html   ← 前端页面
-├── resources/          ← SQLite + ChromaDB 持久化目录
-└── PRD.md / README.md
+
+Open `http://127.0.0.1:8000`.
+
+## Verification and maintenance
+
+Run the white-box verification script from the project root:
+
+```bash
+python verify_token_mechanisms.py
 ```
+
+It reads one existing local Chroma collection and uses a temporary database for write-oriented tests. It verifies evidence budgets, collection replacement, and ToolMessage cleanup.
+
+Useful inspection command:
+
+```bash
+python inspect_session.py
+```
+
+SQLite databases may retain free pages after deleting conversations. With the service stopped, back up the database and run:
+
+```sql
+PRAGMA wal_checkpoint(TRUNCATE);
+VACUUM;
+PRAGMA integrity_check;
+```
+
+## V1 boundaries
+
+- One paper per conversation; uploading another PDF resets that conversation's paper data and messages.
+- PDF page labels refer to physical PDF pages, not printed page numbers.
+- Section detection targets common English academic headings and cannot guarantee perfect extraction for every PDF layout.
+- Retrieval uses vector similarity plus MMR, not a cross-encoder reranker.
+- SQLite is appropriate for the single-user/local V1 workflow, not a high-concurrency deployment.
+- A full-context model may be preferable for one-off, deep reading of a short paper; V1 prioritizes bounded, source-addressable multi-turn use.
+
+## Project layout
+
+```text
+app.py                       FastAPI endpoints, SSE, evidence construction
+agent_setup.py               LangGraph agent and SQLite checkpointer
+paper_parser.py              PDF extraction, cleanup, section and page tracking
+rag_store.py                 ChromaDB storage, embeddings, retrieval, MMR
+query_router.py              A1/A2/B/C question routing
+prompts.py                   Evidence-grounding prompt rules
+database.py                  Session metadata and SQLite connection setup
+static/index.html            Browser interface
+verify_token_mechanisms.py   White-box verification script
+inspect_session.py           Read-only conversation/vector inspection
+Token优化复盘.md             Token-control design notes
+INTERVIEW.md                 Interview-oriented project explanation
+```
+
+## Future direction
+
+V1 is intentionally closed after single-paper evidence-grounded reading. A useful next project should not merely add more agents; it should solve a workflow that generic chat cannot reliably own, such as paper-to-code-to-experiment reproducibility and comparison for time-series research.

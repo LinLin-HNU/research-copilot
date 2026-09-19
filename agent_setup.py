@@ -20,6 +20,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from config import model
 from prompts import get_system_prompt
 
+DB_PATH = "resources/research_copilot.db"
+
 
 @dataclass
 class RequestContext:
@@ -57,16 +59,57 @@ def request_prompt(request) -> str:
     return prompt
 
 
-def create_research_agent():
-    # 相对路径：需在 Research_Copilot 目录下运行
-    connection = sqlite3.connect("resources/research_copilot.db", check_same_thread=False)
+def _new_checkpointer() -> SqliteSaver:
+    # LangGraph 会在它自己的后台线程池里写 checkpoint，因此连接必须允许跨线程
+    # （check_same_thread=False）。SqliteSaver.cursor() 内部用一把锁串行化所有
+    # 读写，故单连接跨线程是安全的（官方文档推荐用法）。
+    # 另开 WAL + busy_timeout：database.py 操作 sessions 表用的是另一条连接，
+    # WAL 允许并发读、写互斥排队，busy_timeout 让锁冲突时等待而非立刻报 locked。
+    connection = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=10000")
     checkpointer = SqliteSaver(connection)
     checkpointer.setup()
+    return checkpointer
 
+
+_agent = None
+_checkpointer = None
+
+
+def get_checkpointer() -> SqliteSaver:
+    """Return the process-level checkpointer used by the chat agent."""
+    global _checkpointer
+    if _checkpointer is None:
+        _checkpointer = _new_checkpointer()
+    return _checkpointer
+
+
+def clear_thread_history(thread_id: str) -> None:
+    """Remove all persisted messages for one conversation thread."""
+    get_checkpointer().delete_thread(thread_id)
+
+
+def get_research_agent():
+    """进程级单例 Agent（单连接 + saver 内置锁，线程安全）。"""
+    global _agent
+    if _agent is None:
+        _agent = create_agent(
+            model,
+            tools=[],
+            middleware=[request_prompt],
+            context_schema=RequestContext,
+            checkpointer=get_checkpointer(),
+        )
+    return _agent
+
+
+def create_research_agent():
+    """构建一个使用独立连接的 Agent（仅供需要独立 checkpointer 的脚本使用）。"""
     return create_agent(
         model,
         tools=[],
         middleware=[request_prompt],
         context_schema=RequestContext,
-        checkpointer=checkpointer,
+        checkpointer=_new_checkpointer(),
     )

@@ -14,7 +14,7 @@ from query_router import build_route
 from rag_store import PaperRAG
 from app import build_evidence, SUMMARY_QUERIES
 
-REAL_THREAD = "1180d5b2-617e-4bf1-891c-6b45eb21e70a"  # 真实 Attention 集合，只读
+REAL_THREAD = "3c2d6b6d-c9bc-4c37-9bbe-312065bd0928"  # 真实 Transformers SSMs 集合，只读
 
 # 粗估 token：论文中英混排，约 1 token ≈ 2 个字符（仅用于直观对比，非精确计费值）
 def approx_tokens(chars: int) -> int:

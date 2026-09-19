@@ -9,7 +9,8 @@ DB_PATH="resources/research_copilot.db"
 
 def get_db_connection():
   """获取数据库连接，并设置row_factory为sqlite3.Row，以便返回字典形式的结果"""
-  conn=sqlite3.connect(DB_PATH,check_same_thread=False)
+  conn=sqlite3.connect(DB_PATH,check_same_thread=False,timeout=10)
+  conn.execute("PRAGMA busy_timeout=10000")
   conn.row_factory=sqlite3.Row    #正常情况下，返回的数据是元组格式，这一行可以使得结果为字典格式，用row['thread_id']来取值
   return conn
 
@@ -18,6 +19,7 @@ def init_db():
   os.makedirs(os.path.dirname(DB_PATH),exist_ok= True)
   conn=get_db_connection()
   try :
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
       """
       CREATE TABLE IF NOT EXISTS sessions(
