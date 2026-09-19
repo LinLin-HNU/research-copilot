@@ -1,4 +1,4 @@
-# AI Research Copilot
+# Research Assistant Agent
 
 > V1.0 — a single-paper, evidence-grounded research reading assistant.
 
