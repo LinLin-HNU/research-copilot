@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.git
+.claude
+.agents
+__pycache__
+*.py[cod]
+resources
+benchmark/reports
+构思

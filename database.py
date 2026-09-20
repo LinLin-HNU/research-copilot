@@ -30,6 +30,70 @@ def init_db():
 );
       """
     )
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS request_metrics(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id TEXT NOT NULL UNIQUE,
+        thread_id TEXT NOT NULL,
+        request_kind TEXT NOT NULL,
+        route_category TEXT,
+        success INTEGER NOT NULL,
+        download_ms REAL,
+        parse_ms REAL,
+        index_ms REAL,
+        routing_ms REAL,
+        retrieval_ms REAL,
+        generation_ms REAL,
+        total_ms REAL NOT NULL,
+        evidence_blocks INTEGER NOT NULL DEFAULT 0,
+        evidence_chars INTEGER NOT NULL DEFAULT 0,
+        output_chars INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        error_type TEXT,
+        created_at TEXT NOT NULL
+      );
+      """
+    )
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_request_metrics_created_at "
+      "ON request_metrics(created_at DESC)"
+    )
+    conn.commit()
+  finally:
+    conn.close()
+
+
+def record_request_metric(metric: dict) -> None:
+  """Persist non-content request telemetry and retain the latest 10,000 rows."""
+  now=datetime.now().isoformat()
+  conn=get_db_connection()
+  try:
+    cursor=conn.execute(
+      """
+      INSERT INTO request_metrics(
+        request_id,thread_id,request_kind,route_category,success,
+        download_ms,parse_ms,index_ms,routing_ms,retrieval_ms,generation_ms,total_ms,
+        evidence_blocks,evidence_chars,output_chars,input_tokens,output_tokens,error_type,created_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      """,
+      (
+        metric["request_id"], metric["thread_id"], metric["request_kind"],
+        metric.get("route_category"), int(metric["success"]),
+        metric.get("download_ms"), metric.get("parse_ms"), metric.get("index_ms"),
+        metric.get("routing_ms"), metric.get("retrieval_ms"), metric.get("generation_ms"),
+        metric["total_ms"], metric.get("evidence_blocks", 0), metric.get("evidence_chars", 0),
+        metric.get("output_chars", 0), metric.get("input_tokens"), metric.get("output_tokens"),
+        metric.get("error_type"), now,
+      ),
+    )
+    if cursor.lastrowid % 100 == 0:
+      conn.execute(
+        "DELETE FROM request_metrics WHERE id IN ("
+        "SELECT id FROM request_metrics ORDER BY id DESC LIMIT -1 OFFSET 10000"
+        ")"
+      )
     conn.commit()
   finally:
     conn.close()

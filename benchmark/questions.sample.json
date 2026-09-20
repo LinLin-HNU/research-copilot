@@ -1,0 +1,30 @@
+[
+  {
+    "id": "a1-method-01",
+    "question": "What method does this paper propose?",
+    "expected_category": "A1",
+    "expected_sections": ["method"],
+    "expected_terms": []
+  },
+  {
+    "id": "a2-limitations-01",
+    "question": "What limitations and improvement opportunities does this paper have?",
+    "expected_category": "A2",
+    "expected_sections": ["discussion", "conclusion"],
+    "expected_terms": []
+  },
+  {
+    "id": "b-background-01",
+    "question": "What is FlashAttention?",
+    "expected_category": "B",
+    "expected_sections": [],
+    "expected_terms": []
+  },
+  {
+    "id": "c-idea-01",
+    "question": "Based on this paper, suggest one research direction.",
+    "expected_category": "C",
+    "expected_sections": ["method"],
+    "expected_terms": []
+  }
+]

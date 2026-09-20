@@ -1,6 +1,6 @@
 # Research Assistant Agent
 
-> V1.0 — a single-paper, evidence-grounded research reading assistant.
+> V1.1 — a single-paper, evidence-grounded research reading assistant with evaluation, telemetry, and container delivery.
 
 Upload a PDF paper and receive a structured summary or follow-up answer whose paper facts are tied to retrieved source sections, PDF pages, and original excerpts. V1 is designed to make paper claims inspectable; it is not intended to replace reading a paper in full.
 
@@ -93,6 +93,25 @@ Useful inspection command:
 python inspect_session.py
 ```
 
+### Request metrics
+
+Each completed `/chat` request records non-content telemetry in SQLite: request type and route, evidence size, phase latency (`download`, `parse`, `index`, `routing`, `retrieval`, `generation`), output size, and provider token usage when supplied. It does not store user prompts, paper text, or generated answers. The table retains the latest 10,000 rows.
+
+```bash
+python metrics_report.py
+```
+
+### Benchmark
+
+The `benchmark/` folder contains a repeatable protocol for routing, retrieval, citation review, and grounding review. Build a manually labelled 30–50 question set before making resume claims about accuracy or cost.
+
+```bash
+python benchmark/run_benchmark.py --cases benchmark/questions.json --thread-id YOUR_LOCAL_THREAD_ID
+python benchmark/summarize_human_review.py benchmark/review.csv
+```
+
+See [benchmark/README.md](benchmark/README.md) for the schema and review rubric.
+
 SQLite databases may retain free pages after deleting conversations. With the service stopped, back up the database and run:
 
 ```sql
@@ -100,6 +119,22 @@ PRAGMA wal_checkpoint(TRUNCATE);
 VACUUM;
 PRAGMA integrity_check;
 ```
+
+## Docker
+
+Build and run locally:
+
+```bash
+docker compose up --build
+```
+
+The compose configuration reads `.env` and mounts `./resources` so SQLite and ChromaDB survive container recreation.
+
+Do **not** expose this V1 container directly on the public internet. `/oss/token` currently issues upload credentials without application-level authentication. Before a public deployment, add user authentication, a least-privilege STS policy scoped to a per-user upload prefix, rate limiting, HTTPS, and secret management.
+
+## Continuous verification
+
+The repository includes dependency installation, syntax checks, and offline unit tests in GitHub Actions. The tests cover PDF margin cleanup and page tracking, evidence-budget ordering, and telemetry privacy boundaries. Live model and OSS calls remain outside CI because they require private credentials and would make builds non-deterministic.
 
 ## V1 boundaries
 
@@ -120,9 +155,13 @@ rag_store.py                 ChromaDB storage, embeddings, retrieval, MMR
 query_router.py              A1/A2/B/C question routing
 prompts.py                   Evidence-grounding prompt rules
 database.py                  Session metadata and SQLite connection setup
+metrics_report.py            Read-only latency, evidence, and token summary
 static/index.html            Browser interface
 verify_token_mechanisms.py   White-box verification script
 inspect_session.py           Read-only conversation/vector inspection
+benchmark/                   Curated evaluation runner and human-review rubric
+tests/                       Offline regression tests
+Dockerfile / compose.yaml    Container delivery for trusted deployments
 Token优化复盘.md             Token-control design notes
 INTERVIEW.md                 Interview-oriented project explanation
 ```

@@ -23,6 +23,9 @@ resources/
 # 私人规划文档
 构思
 
+# Generated evaluation reports
+benchmark/reports/
+
 # 编辑器 / IDE
 .vscode/
 .idea/

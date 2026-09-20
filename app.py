@@ -1,5 +1,6 @@
 import json
 import uuid
+from time import perf_counter
 
 import httpx
 from fastapi import FastAPI, Request
@@ -9,7 +10,10 @@ from contextlib import asynccontextmanager
 from langchain.messages import HumanMessage, AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.messages import RemoveMessage
 from agent_setup import clear_thread_history, get_research_agent, RequestContext
-from database import init_db, create_session, list_sessions, delete_session, update_session_title
+from database import (
+    init_db, create_session, list_sessions, delete_session, update_session_title,
+    record_request_metric,
+)
 from schemas import ChatRequest, HistoryItem, HistoryResponse, DeleteResponse
 from oss_sts import get_oss_token
 from paper_parser import extract_text_from_bytes, detect_sections, chunk_sections, guess_title
@@ -26,7 +30,7 @@ async def lifespan(app):
 app = FastAPI(
     title="AI Research Copilot",
     description="AI 科研论文助手：上传 PDF，自动生成结构化摘要，支持论文问答",
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -335,6 +339,7 @@ def _status(message: str) -> str:
 
 @app.post("/chat")
 async def chat(request: ChatRequest, fastapi_req: Request):
+    request_started = perf_counter()
     rag = get_rag()
 
     if not request.thread_id:
@@ -348,80 +353,122 @@ async def chat(request: ChatRequest, fastapi_req: Request):
     is_pdf = request.file_type == "pdf" and bool(request.image_url)
     # 仅网络下载放在 async 里；PDF 解析/入库与检索都是 CPU/阻塞操作，
     # 移到下面的同步 SSE 生成器（由线程池执行），期间还能向前端推送进度
+    download_started = perf_counter()
     pdf_data = await download_from_oss(request.image_url) if is_pdf else None
+    download_ms = (perf_counter() - download_started) * 1000 if is_pdf else 0.0
     user_text = request.user_text or "请帮我分析这篇论文"
     config = {"recursion_limit": 15, "configurable": {"thread_id": thread_id}}
+    metric = {
+        "request_id": str(uuid.uuid4()),
+        "thread_id": thread_id,
+        "request_kind": "pdf_summary" if is_pdf else "question",
+        "success": False,
+        "download_ms": round(download_ms, 2),
+        "evidence_blocks": 0,
+        "evidence_chars": 0,
+        "output_chars": 0,
+    }
 
     def event_stream():
         yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id})}\n\n"
+        try:
+            agent = get_research_agent()
 
-        agent = get_research_agent()
+            paper_title = ""
+            if is_pdf:
+                yield _status("正在解析论文 PDF...")
+                parse_started = perf_counter()
+                full_text, line_pages = extract_text_from_bytes(pdf_data)
+                sections, section_pages = detect_sections(full_text, line_pages)
+                chunks = chunk_sections(sections, section_pages)
+                metric["parse_ms"] = round((perf_counter() - parse_started) * 1000, 2)
+                if not chunks:
+                    raise ValueError("No readable text chunks were extracted from the PDF.")
+                paper_title = guess_title(full_text)
+                index_started = perf_counter()
+                clear_thread_history(thread_id)
+                rag.delete_collection(thread_id)
+                rag.store(thread_id, chunks, paper_title)
+                metric["index_ms"] = round((perf_counter() - index_started) * 1000, 2)
+                if paper_title:
+                    update_session_title(thread_id, paper_title)
 
-        paper_title = ""
-        if is_pdf:
-            yield _status("正在解析论文 PDF...")
-            full_text, line_pages = extract_text_from_bytes(pdf_data)
-            sections, section_pages = detect_sections(full_text, line_pages)
-            chunks = chunk_sections(sections, section_pages)
-            if not chunks:
-                raise ValueError("No readable text chunks were extracted from the PDF.")
-            paper_title = guess_title(full_text)
-            clear_thread_history(thread_id)
-            rag.delete_collection(thread_id)
-            rag.store(thread_id, chunks, paper_title)
-            if paper_title:
-                update_session_title(thread_id, paper_title)
-
-        # 证据放进 RequestContext（进系统提示、不持久化）；用户消息只保留纯文本
-        if is_pdf and paper_title:
-            yield _status("正在检索论文关键章节...")
-            evidence = build_summary_evidence(rag, thread_id)
-            guidance = GUIDANCE_SUMMARY if evidence else GUIDANCE_SUMMARY_EMPTY
-            request_context = RequestContext(evidence=evidence, guidance=guidance)
-            message = HumanMessage(
-                content=f"[用户上传了新论文]《{paper_title}》\n用户说：{user_text}"
-            )
-        else:
-            yield _status("正在分析问题...")
-            route = build_route(user_text)
-            if not route["needs_retrieval"]:
-                # B 类领域知识：不检索，界面不会出现「检索论文」提示
-                request_context = RequestContext(evidence="", guidance=GUIDANCE_B)
-            else:
-                yield _status("正在检索论文内容...")
-                evidence = build_question_evidence(rag, thread_id, route)
-                if evidence:
-                    guidance = ROUTE_GUIDANCE.get(route["category"], ROUTE_GUIDANCE["A1"])
-                else:
-                    guidance = GUIDANCE_NO_EVIDENCE
+            if is_pdf and paper_title:
+                yield _status("正在检索论文关键章节...")
+                retrieval_started = perf_counter()
+                evidence = build_summary_evidence(rag, thread_id)
+                metric["retrieval_ms"] = round((perf_counter() - retrieval_started) * 1000, 2)
+                metric["route_category"] = "SUMMARY"
+                guidance = GUIDANCE_SUMMARY if evidence else GUIDANCE_SUMMARY_EMPTY
                 request_context = RequestContext(evidence=evidence, guidance=guidance)
-            message = HumanMessage(content=user_text)
+                message = HumanMessage(
+                    content=f"[用户上传了新论文]《{paper_title}》\n用户说：{user_text}"
+                )
+            else:
+                yield _status("正在分析问题...")
+                routing_started = perf_counter()
+                route = build_route(user_text)
+                metric["routing_ms"] = round((perf_counter() - routing_started) * 1000, 2)
+                metric["route_category"] = route["category"]
+                if not route["needs_retrieval"]:
+                    request_context = RequestContext(evidence="", guidance=GUIDANCE_B)
+                else:
+                    yield _status("正在检索论文内容...")
+                    retrieval_started = perf_counter()
+                    evidence = build_question_evidence(rag, thread_id, route)
+                    metric["retrieval_ms"] = round((perf_counter() - retrieval_started) * 1000, 2)
+                    if evidence:
+                        guidance = ROUTE_GUIDANCE.get(route["category"], ROUTE_GUIDANCE["A1"])
+                    else:
+                        guidance = GUIDANCE_NO_EVIDENCE
+                    request_context = RequestContext(evidence=evidence, guidance=guidance)
+                message = HumanMessage(content=user_text)
 
-        # 兜底清理旧会话历史中的工具消息
-        prune_tool_messages(agent, config)
+            evidence_text = request_context.evidence
+            metric["evidence_blocks"] = len(
+                [part for part in evidence_text.split("\n\n---\n\n") if part.strip()]
+            )
+            metric["evidence_chars"] = len(evidence_text)
+            prune_tool_messages(agent, config)
 
-        yield _status("正在生成回答...")
-        ai_text = ""
-        for chunk, _metadata in agent.stream(
-            {"messages": [message]},
-            stream_mode="messages",
-            config=config,
-            context=request_context,
-        ):
-            if isinstance(chunk, AIMessageChunk):
-                text = chunk.content if isinstance(chunk.content, str) else ""
-                if text:
-                    ai_text += text
-                    yield f"data: {json.dumps({'type': 'content', 'content': text}, ensure_ascii=False)}\n\n"
+            yield _status("正在生成回答...")
+            generation_started = perf_counter()
+            ai_text = ""
+            for chunk, _metadata in agent.stream(
+                {"messages": [message]},
+                stream_mode="messages",
+                config=config,
+                context=request_context,
+            ):
+                if isinstance(chunk, AIMessageChunk):
+                    usage = getattr(chunk, "usage_metadata", None) or {}
+                    for field in ("input_tokens", "output_tokens"):
+                        value = usage.get(field)
+                        if isinstance(value, int):
+                            metric[field] = max(metric.get(field, 0), value)
+                    text = chunk.content if isinstance(chunk.content, str) else ""
+                    if text:
+                        ai_text += text
+                        yield f"data: {json.dumps({'type': 'content', 'content': text}, ensure_ascii=False)}\n\n"
+            metric["generation_ms"] = round((perf_counter() - generation_started) * 1000, 2)
+            metric["output_chars"] = len(ai_text)
+            metric["success"] = True
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-        # 新会话自动取首行作为标题（纯问答会话）
-        if is_new and ai_text and not paper_title:
-            title = ai_text.split("\n")[0].strip()[:30]
-            title = title.replace("#", "").replace("*", "").strip()
-            if title:
-                update_session_title(thread_id, title)
+            if is_new and ai_text and not paper_title:
+                title = ai_text.split("\n")[0].strip()[:30]
+                title = title.replace("#", "").replace("*", "").strip()
+                if title:
+                    update_session_title(thread_id, title)
+        except Exception as exc:
+            metric["error_type"] = type(exc).__name__
+            raise
+        finally:
+            metric["total_ms"] = round((perf_counter() - request_started) * 1000, 2)
+            try:
+                record_request_metric(metric)
+            except Exception:
+                pass
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
