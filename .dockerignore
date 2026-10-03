@@ -8,4 +8,13 @@ __pycache__
 *.py[cod]
 resources
 benchmark/reports
+benchmark/experiments/private
+benchmark/experiments/answers_*.jsonl
+benchmark/experiments/*mapping*.json
+benchmark/experiments/*review*.csv
+benchmark/answers
+benchmark/drafts
+benchmark/questions.json
+.venv
+venv
 构思

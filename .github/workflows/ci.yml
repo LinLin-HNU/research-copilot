@@ -9,6 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Unit tests mock external calls, but LangChain validates these values
+    # while importing the application configuration.
+    env:
+      DASHSCOPE_API_KEY: ci-test-key
+      DASHSCOPE_BASE_URL: https://example.invalid/v1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
