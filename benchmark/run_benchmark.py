@@ -1,4 +1,6 @@
-"""Run routing and retrieval checks for a manually curated paper benchmark."""
+"""Run routing and retrieval checks for a manually curated paper benchmark.
+自动测路由准确率 + 检索命中率（不生成回答，省钱）
+"""
 import argparse
 import json
 import sys

@@ -4,6 +4,15 @@
 
 Upload a PDF paper and receive a structured summary or follow-up answer whose paper facts are tied to retrieved source sections, PDF pages, and original excerpts. V1 is designed to make paper claims inspectable; it is not intended to replace reading a paper in full.
 
+## Documentation
+
+| Doc | For whom | What it covers |
+|---|---|---|
+| [`docs/DEV_JOURNAL.md`](docs/DEV_JOURNAL.md) | Yourself | Version timeline, shipped features and their tech, hard problems, current real issues (recorded honestly), and the evaluation/resume action plan |
+| [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md) | Claude / Codex | What the project is, architecture, file map, how to run, design constraints, V2/V3 roadmap (marked future), and ready-to-paste Codex prompts |
+| [`benchmark/README.md`](benchmark/README.md) | Contributors | Evaluation protocol and review rubric |
+| `docs/archive/` | Reference | Origin brainstorm, token-control retrospective, interview notes |
+
 ## What V1 does
 
 - Upload one PDF per conversation through Alibaba Cloud OSS and temporary STS credentials.
@@ -103,10 +112,11 @@ python metrics_report.py
 
 ### Benchmark
 
-The `benchmark/` folder contains a repeatable protocol for routing, retrieval, citation review, and grounding review. Build a manually labelled 30–50 question set before making resume claims about accuracy or cost.
+The `benchmark/` folder contains a repeatable protocol for routing, retrieval, citation review, and grounding review. The current set covers 30 labelled cases across 3 papers. See the action plan in [`docs/DEV_JOURNAL.md`](docs/DEV_JOURNAL.md) for scaling it toward 10 papers / 100 questions.
 
 ```bash
-python benchmark/run_benchmark.py --cases benchmark/questions.json --thread-id YOUR_LOCAL_THREAD_ID
+# thread_id is optional here: each case in questions.json carries its own thread_id
+python benchmark/run_benchmark.py --cases benchmark/questions.json --output benchmark/reports/v2.json
 python benchmark/summarize_human_review.py benchmark/review.csv
 ```
 
@@ -162,8 +172,7 @@ inspect_session.py           Read-only conversation/vector inspection
 benchmark/                   Curated evaluation runner and human-review rubric
 tests/                       Offline regression tests
 Dockerfile / compose.yaml    Container delivery for trusted deployments
-Token优化复盘.md             Token-control design notes
-INTERVIEW.md                 Interview-oriented project explanation
+docs/                        Retrospective and project brief; archive holds historical notes
 ```
 
 ## Future direction

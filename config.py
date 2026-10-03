@@ -12,7 +12,7 @@ load_dotenv(Path(__file__).parent / '.env')
 # content="" 的空 chunk，表现为界面一直「输出中」却没有任何正文。这里全局关闭思考
 # （与 query_router 的处理一致）；本任务是基于给定证据的总结/问答，无需长推理。
 model=init_chat_model(
-    "qwen3.8-omni-flash",
+    "deepseek-v4-flash-0731",
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url=os.getenv("DASHSCOPE_BASE_URL"),
     model_provider="openai",

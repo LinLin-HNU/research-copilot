@@ -23,10 +23,16 @@ resources/
 # 私人规划文档
 构思
 
-# Generated evaluation reports
+# Generated evaluation reports, answers, and intermediate drafts
 benchmark/reports/
+benchmark/answers/
+benchmark/drafts/
 
 # 编辑器 / IDE
 .vscode/
 .idea/
 .DS_Store
+
+#评测问价和介绍文档
+benchmark/questions.json
+docs/科研助手V1_简历项目描述草稿.md

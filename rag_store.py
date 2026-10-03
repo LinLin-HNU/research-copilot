@@ -29,7 +29,7 @@ def _embed(texts: list[str]) -> list[list[float]]:      #下划线前缀_embeg�
                 "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={"model": "qwen3.7-text-embedding", "input": batch},
+            json={"model": "qwen3.7-text-embedding-flash", "input": batch},
         )
         if resp.status_code != 200:                     #异常处理：把响应体一起抛出，便于定位 4xx 根因
             raise RuntimeError(f"embedding API {resp.status_code}: {resp.text}")
