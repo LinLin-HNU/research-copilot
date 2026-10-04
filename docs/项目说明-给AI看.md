@@ -1,7 +1,9 @@
-# Research Copilot — 项目说明（PROJECT BRIEF）
+# 项目说明 —— 给 AI 看
 
 > 面向 **Claude / Codex 等 AI 助手**：读完这份就能快速明白项目做什么、怎么跑、文件怎么分工、哪些能改哪些是边界。
-> 开发者复盘（历史难题、真实现状、评测/简历行动）见 `docs/DEV_JOURNAL.md`。本文件第 9 节附了可直接使用的 Codex 辅助提示词。
+> **改动代码前必读：第 4 节（关键设计约束）与第 7 节（已知边界）。**
+> 人的视角（开发历史、踩坑、问题详版、未来计划）见 `开发复盘-给自己看.md`，与这份互补但不要重复维护——**问题的唯一详版在开发复盘里**。
+> 本文件第 9 节附了可直接使用的 Codex 辅助提示词。
 
 ---
 
@@ -91,9 +93,13 @@ metrics_report.py     遥测只读汇总（成功率、p50/p95、token）
 inspect_session.py    会话/向量只读查看器
 static/index.html     浏览器界面
 benchmark/            评测：questions.json、run_benchmark.py、人工评阅模板与汇总
+benchmark/experiments/ 离线实验与裁判脚本（见该目录 README）
+                      ⚠️ v2_experimental 只是 v1_current 的别名，不是另一个算法，别当成两个版本比较
 tests/test_core.py    离线单测（噪声页码、兜底排序、遥测隐私）
 Dockerfile/compose.yaml/.github/   容器与 CI（Docker 未实操）
-docs/                 本说明、复盘、评测行动；archive 存历史文档
+docs/开发复盘-给自己看.md   人的视角：历史、踩坑、问题详版、未来计划
+docs/项目说明-给AI看.md     本文件
+docs/归档/            历史文档存档（不参与日常阅读）
 ```
 
 ---
@@ -125,19 +131,33 @@ python benchmark/summarize_human_review.py benchmark/review.csv
 python metrics_report.py
 ```
 
+LLM 裁判（**会真实产生费用**，务必先跑冒烟）：
+```powershell
+python -u benchmark/experiments/judge_evidence_v2.py run --packets benchmark/experiments/private/judge_evidence_v2_smoke_old_answers/packets.json --passes 1 --confirm-paid --output benchmark/experiments/private/judge_evidence_v2_smoke_run
+python benchmark/experiments/judge_evidence_v2.py score --run benchmark/experiments/private/judge_evidence_v2_smoke_run --packets benchmark/experiments/private/judge_evidence_v2_smoke_old_answers --output benchmark/experiments/private/judge_evidence_v2_smoke_scored.json
+```
+
 数据位置：`resources/research_copilot.db`（SQLite）、`resources/` 下 ChromaDB 持久化目录。`.env`、论文原文、答案、真实 thread_id 不要提交。
 
 ---
 
-## 7. 已知边界（V1.1）
+## 7. 已知边界（V1.1）—— 改动前必读
 
+**能力边界**（写代码/加功能时必须尊重）：
 - 一会话一篇论文；再传即重置该会话。
 - 章节识别针对常见英文学术标题，不能保证适配所有排版。
 - 检索为向量 + MMR，**无 cross-encoder 精排**；存在"章节对、关键实体块落选"的真实短板。
-- Chroma 默认 L2 与 MMR 内部余弦度量不一致。
-- 页码是 PDF 物理页码。
+- Chroma 默认 L2 与 MMR 内部余弦度量不一致（改检索排序前先确认度量口径）。
+- 页码是 PDF 物理页码，带封面/目录的期刊论文与印刷页码有偏移。
 - SQLite 适合单用户本地，不适合高并发。
-- `/oss/token` 无鉴权，**不可直接公网暴露**。
+
+**安全边界**（这些接口目前没有鉴权，不要写"已支持多用户"）：
+- `/oss/token`、`/history`、`/chat/{thread_id}/messages`、删除历史接口**都无身份与资源归属校验**。
+- STS AssumeRole **未按用户目录收窄 Policy**。
+- `/chat` 的 PDF URL 由客户端传入、服务端直接下载 → **SSRF 风险**，公网前需限定可信来源与超时。
+- 无限流、无费用预算、无并发限制。**不可直接公网暴露。**
+
+> 以上只是"硬约束清单"。每个问题的背景、复现、试过的方案和量化数据，见 `开发复盘-给自己看.md` 第六节——**那份是唯一详版，不要在这里复制粘贴，避免两处不一致。**
 
 ---
 

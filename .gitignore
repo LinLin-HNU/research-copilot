@@ -20,8 +20,10 @@ resources/
 # 本地工具配置（Claude Code 等）
 .claude/
 
-# 私人规划文档
-构思
+# 私人内容：本地保留、不入库（原始对话 / 面试稿 / 简历草稿）
+docs/归档/起源-构思.md
+docs/归档/INTERVIEW.md
+docs/归档/简历草稿-不上传.md
 
 # Generated evaluation reports, answers, and intermediate drafts
 benchmark/reports/
@@ -35,4 +37,3 @@ benchmark/drafts/
 
 #评测问价和介绍文档
 benchmark/questions.json
-docs/科研助手V1_简历项目描述草稿.md

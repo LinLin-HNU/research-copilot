@@ -8,10 +8,10 @@ Upload a PDF paper and receive a structured summary or follow-up answer whose pa
 
 | Doc | For whom | What it covers |
 |---|---|---|
-| [`docs/DEV_JOURNAL.md`](docs/DEV_JOURNAL.md) | Yourself | Version timeline, shipped features and their tech, hard problems, current real issues (recorded honestly), and the evaluation/resume action plan |
-| [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md) | Claude / Codex | What the project is, architecture, file map, how to run, design constraints, V2/V3 roadmap (marked future), and ready-to-paste Codex prompts |
+| [`docs/开发复盘-给自己看.md`](docs/%E5%BC%80%E5%8F%91%E5%A4%8D%E7%9B%98-%E7%BB%99%E8%87%AA%E5%B7%B1%E7%9C%8B.md) | Yourself | Version timeline, shipped features and their tech, hard problems, current real issues (recorded honestly), and the evaluation/resume action plan |
+| [`docs/项目说明-给AI看.md`](docs/%E9%A1%B9%E7%9B%AE%E8%AF%B4%E6%98%8E-%E7%BB%99AI%E7%9C%8B.md) | Claude / Codex | What the project is, architecture, file map, how to run, design constraints, V2/V3 roadmap (marked future), and ready-to-paste Codex prompts |
 | [`benchmark/README.md`](benchmark/README.md) | Contributors | Evaluation protocol and review rubric |
-| `docs/archive/` | Reference | Origin brainstorm, token-control retrospective, interview notes |
+| `docs/归档/` | Reference | Archived historical notes (token-control retrospective, origin brainstorm, interview notes) |
 
 ## What V1 does
 
@@ -112,7 +112,7 @@ python metrics_report.py
 
 ### Benchmark
 
-The `benchmark/` folder contains a repeatable protocol for routing, retrieval, citation review, and grounding review. The current set covers 30 labelled cases across 3 papers. See the action plan in [`docs/DEV_JOURNAL.md`](docs/DEV_JOURNAL.md) for scaling it toward 10 papers / 100 questions.
+The `benchmark/` folder contains a repeatable protocol for routing, retrieval, citation review, and grounding review. The current set covers 30 labelled cases across 3 papers. See the action plan in [`docs/开发复盘-给自己看.md`](docs/%E5%BC%80%E5%8F%91%E5%A4%8D%E7%9B%98-%E7%BB%99%E8%87%AA%E5%B7%B1%E7%9C%8B.md) for scaling it toward 10 papers / 100 questions.
 
 ```bash
 # thread_id is optional here: each case in questions.json carries its own thread_id
@@ -172,7 +172,7 @@ inspect_session.py           Read-only conversation/vector inspection
 benchmark/                   Curated evaluation runner and human-review rubric
 tests/                       Offline regression tests
 Dockerfile / compose.yaml    Container delivery for trusted deployments
-docs/                        Retrospective and project brief; archive holds historical notes
+docs/                        开发复盘（给自己看）+ 项目说明（给 AI 看）；归档/ 存历史文档
 ```
 
 ## Future direction
