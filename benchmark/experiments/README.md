@@ -2,6 +2,30 @@
 
 这些是评测工具，不是产品 V2/V3。`v2_experimental` 目前只是 `v1_current` 的别名，不能把两者当两个不同算法。
 
+## 2026 10 检索消融框架
+
+消融实验在独立的 `experiment/ablation-20261005` Worktree 中开发。实验代码优先位于
+`benchmark/experiments/` 和 `tests/`，获胜方案经过确认前不修改生产检索入口。
+
+阶段 1 先运行完全离线的协议 smoke test。它只使用合成题目、合成 chunk 和固定排名，
+不会读取 `.env`、不会访问 Chroma、不会调用 embedding、路由或答案模型。其输出只能证明：
+
+- 题目 ID 和 split 校验有效；
+- R0 与 R1 使用完全相同的候选池、块数、单块字符数和总字符预算；
+- 题库哈希、语料指纹、变体和预算会进入 manifest；
+- 成对变体缺失或预算漂移时实验会直接失败；
+- 合成 smoke 结果不会被当成项目质量指标。
+
+```powershell
+$py = 'C:\Users\86195\PycharmProjects\PythonProject2\.venv\Scripts\python.exe'
+$env:PYTHONUTF8 = '1'
+& $py -m unittest tests.test_ablation_protocol -v
+& $py benchmark/experiments/smoke_ablation_protocol.py --output benchmark/experiments/private/ablation_protocol_smoke
+```
+
+输出目录必须不存在。运行成功后会生成 `manifest.json`、`retrieval_rows.jsonl` 和
+`summary.json`。这些文件位于私人实验结果目录，不应提交到 Git。
+
 ## 当前交付状态
 
 - 切窗、top-k、盲评、Wilson 区间、一致率和实验控制流通过离线验证。
