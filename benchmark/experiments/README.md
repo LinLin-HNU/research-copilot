@@ -48,6 +48,38 @@ $env:PYTHONUTF8 = '1'
 真实运行会把问题文本发送到项目 `.env` 配置的 embedding API。72 题由现有批处理
 最多分成约 4 个 HTTP 请求；不会发送论文 chunk，不调用路由或答案生成模型。
 
+### 证据预算消融：离线重放固定排名
+
+`replay_evidence_budget.py` 从已完成的 R0/R1 结果读取每题的固定 Top 8 排名，
+仅改变每块字符上限与总字符预算：600/4000、1200/4000、600/8000、1200/8000。
+最多 8 块、原问题、语料、排名、打包顺序和评分口径保持相同；遇到超预算块即停止，
+沿用基线行为。较长单块可能挤掉后续块，8000 的上限也不代表实际用满。
+
+脚本仅依赖 Python 标准库和离线评测函数。以 SQLite `mode=ro` 读取归档 Chroma
+快照，不启动 Chroma、不加载 `.env`、不调用任何 API。首先验证题库哈希、九篇论文
+的语料指纹、配对与候选池，再精确复现原 144 行的指标、选块 ID 和证据长度。
+任一校验不通过就停止。开发验收可以只运行 `--check-only`：
+
+```powershell
+python -B benchmark/experiments/replay_evidence_budget.py --source-run benchmark/experiments/private/r0_r1_full_20261005 --check-only
+```
+
+由用户执行正式四组实验（输出目录必须不存在）：
+
+```powershell
+python -B -u benchmark/experiments/replay_evidence_budget.py --source-run benchmark/experiments/private/r0_r1_full_20261005 --output benchmark/experiments/private/evidence_budget_20261005
+```
+
+72 题 × 两种排序 × 四组预算，共 576 行；生成 `report.md`、`summary.json`、
+`budget_rows.jsonl` 和 `manifest.json`。逐题文件包含问题、最终证据、选块、
+缺失词在原块中的位置，以及单块截断/总预算丢失原因。它们留在 private 目录。
+如果题库搬家，可传 `--cases 新地址`，但哈希仍须与原运行一致。
+
+验收顺序：读取汇总 → 查看改善、退化、始终失败的代表题原文 → 权衡实际证据长度
+与覆盖变化 → 记录暂定配置和未验证项。脚本不自动宣布最高命中配置获胜。
+字符长度不是实际 token 消耗，本轮不生成答案，也不提供答案正确率结论。
+标准关键词仅用于事后打分；Agent 的运行时决策不能读取这些 gold 字段。
+
 ## 当前交付状态
 
 - 切窗、top-k、盲评、Wilson 区间、一致率和实验控制流通过离线验证。
