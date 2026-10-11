@@ -17,7 +17,7 @@ DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 DASHSCOPE_BASE_URL = (os.getenv("DASHSCOPE_BASE_URL") or "").rstrip("/")
 
 
-def _embed(texts: list[str]) -> list[list[float]]:      #下划线前缀_embeg，这表示是一个内部函数，仅供本模块内的类使用，不对外暴露
+def _embed(texts: list[str], timeout_seconds: float | None = None) -> list[list[float]]:      #下划线前缀_embeg，这表示是一个内部函数，仅供本模块内的类使用，不对外暴露
     """调用 DashScope embedding API。接口单批最多 20 条，超出自动分批。"""
     batch_size = 20                                     #DashScope 兼容接口的批次上限
     results: list[list[float]] = []
@@ -30,6 +30,7 @@ def _embed(texts: list[str]) -> list[list[float]]:      #下划线前缀_embeg�
                 "Content-Type": "application/json",
             },
             json={"model": "qwen3.7-text-embedding-flash", "input": batch},
+            timeout=timeout_seconds,
         )
         if resp.status_code != 200:                     #异常处理：把响应体一起抛出，便于定位 4xx 根因
             raise RuntimeError(f"embedding API {resp.status_code}: {resp.text}")
@@ -94,7 +95,8 @@ class PaperRAG:
         )
 
     def search(self, thread_id: str, query: str, k: int = 5,
-               exclude_ids: set | None = None, pool: int = 20, mmr_lambda: float = 0.7) -> list[dict]:
+               exclude_ids: set | None = None, pool: int = 20, mmr_lambda: float = 0.7,
+               timeout_seconds: float | None = None) -> list[dict]:
         """检索与 query 最相关的论文内容。
 
         流程：先召回 pool 个候选（扩大召回面）→ 排除已展示过的 exclude_ids →
@@ -105,7 +107,7 @@ class PaperRAG:
         total = collection.count()
         if total == 0:
             return []
-        emb = _embed([query])
+        emb = _embed([query], timeout_seconds=timeout_seconds)
         query_vec = _normalize(emb[0])
         results = collection.query(
             query_embeddings=[emb[0]],

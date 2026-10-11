@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>论文深读助手</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Microsoft YaHei", sans-serif; }
+    body { margin: 0; background: #f6f7fb; color: #172033; }
+    main { width: min(920px, calc(100% - 32px)); margin: 32px auto 64px; }
+    h1 { margin-bottom: 8px; }
+    .muted { color: #697386; }
+    .panel { background: white; border: 1px solid #e2e6ef; border-radius: 14px; padding: 20px; margin-top: 18px; box-shadow: 0 8px 24px rgba(30, 45, 80, .05); }
+    .grid { display: grid; grid-template-columns: 1fr 190px 190px; gap: 12px; }
+    label { display: block; font-size: 13px; color: #536078; margin: 12px 0 6px; }
+    input, select, textarea, button { font: inherit; box-sizing: border-box; }
+    input, select, textarea { width: 100%; border: 1px solid #cfd6e4; border-radius: 9px; padding: 10px 12px; background: white; }
+    textarea { min-height: 120px; resize: vertical; line-height: 1.6; }
+    button { border: 0; border-radius: 9px; padding: 11px 18px; background: #285bd4; color: white; cursor: pointer; margin-top: 14px; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #status { margin-top: 12px; color: #536078; }
+    #answer { line-height: 1.85; }
+    #answer h3 { margin: 24px 0 8px; font-size: 18px; }
+    #answer p { margin: 8px 0; white-space: pre-wrap; }
+    #answer li { margin: 8px 0; }
+    details { margin-top: 18px; border-top: 1px solid #e6e9f0; padding-top: 14px; }
+    summary { cursor: pointer; color: #285bd4; font-weight: 600; }
+    .source { padding: 9px 0; color: #536078; border-bottom: 1px dashed #e1e5ed; }
+    .notice { padding: 10px 12px; border-radius: 8px; background: #fff7df; color: #71581c; margin-top: 12px; }
+    .import-row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+    .import-row input { flex: 1; min-width: 240px; }
+    .import-row button { margin: 0; }
+    .consent { display: flex; align-items: start; gap: 8px; margin-top: 8px; font-size: 13px; color: #536078; }
+    .consent input { width: auto; margin-top: 3px; }
+    @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>论文深读助手</h1>
+  <p class="muted">自然讲解默认只显示简短章节与页码；详细运行过程仅在管理员 Trace 中查看。</p>
+
+  <section class="panel">
+    <label for="token">研究入口 Token（仅保存在当前页面内存）</label>
+    <input id="token" type="password" autocomplete="off" placeholder="DEEP_RESEARCH_API_TOKEN">
+    <div class="grid">
+      <div>
+        <label for="paper">论文</label>
+        <select id="paper">
+          <option value="" selected disabled>请选择一篇论文</option>
+          <option value="__general__">不使用论文（通用知识）</option>
+        </select>
+      </div>
+      <div>
+        <label for="strategy">策略</label>
+        <select id="strategy">
+          <option value="auto">自动选择（推荐）</option>
+          <option value="fast">片段检索（省 Token）</option>
+          <option value="deep">全文阅读（高消耗）</option>
+        </select>
+      </div>
+      <div>
+        <label for="depth">讲解深度</label>
+        <select id="depth">
+          <option value="beginner">入门详解（推荐）</option>
+          <option value="concise">简明回答</option>
+          <option value="advanced">深入分析</option>
+        </select>
+      </div>
+    </div>
+    <label for="pdf">导入本机 PDF（导入后自动选中）</label>
+    <div class="import-row">
+      <input id="pdf" type="file" accept="application/pdf,.pdf">
+      <button id="import" type="button">导入论文</button>
+    </div>
+    <label class="consent"><input id="confirmEmbedding" type="checkbox">我了解：PDF 在本机解析，提取出的论文分块会发送到已配置的阿里云嵌入服务，可能产生费用。</label>
+    <div id="importStatus" class="muted" role="status"></div>
+    <label for="question">问题</label>
+    <textarea id="question" placeholder="例如：请从问题、方法、实现、为什么有效和局限五个方面讲解这篇论文。"></textarea>
+    <button id="submit">开始分析</button>
+    <div id="status"></div>
+  </section>
+
+  <section id="result" class="panel" hidden>
+    <div id="answer"></div>
+    <div id="suggestion" class="notice" hidden></div>
+    <details id="sourcesBox">
+      <summary>查看论文依据</summary>
+      <div id="sources"></div>
+    </details>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const paper = $('paper');
+  const status = $('status');
+  const submit = $('submit');
+  const importButton = $('import');
+
+  function renderAnswer(text) {
+    const root = $('answer');
+    root.replaceChildren();
+    let list = null;
+    for (const raw of String(text || '').split('\n')) {
+      const line = raw.trim();
+      if (!line) { list = null; continue; }
+      if (line.startsWith('### ')) {
+        list = null;
+        const heading = document.createElement('h3');
+        heading.textContent = line.slice(4);
+        root.appendChild(heading);
+      } else if (line.startsWith('- ')) {
+        if (!list) { list = document.createElement('ul'); root.appendChild(list); }
+        const item = document.createElement('li');
+        item.textContent = line.slice(2);
+        list.appendChild(item);
+      } else {
+        list = null;
+        const paragraph = document.createElement('p');
+        paragraph.textContent = line;
+        root.appendChild(paragraph);
+      }
+    }
+  }
+
+  function renderSources(items) {
+    const root = $('sources');
+    root.replaceChildren();
+    for (const source of items || []) {
+      const row = document.createElement('div');
+      row.className = 'source';
+      const pages = source.page_start === source.page_end
+        ? `第 ${source.page_start} 页`
+        : `第 ${source.page_start}–${source.page_end} 页`;
+      row.textContent = `${source.number}. ${source.section || '未知章节'}，${pages}`;
+      root.appendChild(row);
+    }
+    $('sourcesBox').hidden = !items || items.length === 0;
+  }
+
+  async function loadPapers() {
+    try {
+      const response = await fetch('/history');
+      if (!response.ok) return;
+      const data = await response.json();
+      for (const session of data.sessions || []) {
+        const option = document.createElement('option');
+        option.value = session.thread_id;
+        option.textContent = session.title || session.thread_id;
+        paper.appendChild(option);
+      }
+    } catch (_) {}
+  }
+
+  importButton.addEventListener('click', async () => {
+    const file = $('pdf').files[0];
+    const token = $('token').value.trim();
+    const importStatus = $('importStatus');
+    if (!token || !file || !$('confirmEmbedding').checked) {
+      importStatus.textContent = '请填写 Token、选择 PDF 并勾选嵌入服务说明。';
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      importStatus.textContent = 'PDF 不得超过 25 MB。';
+      return;
+    }
+    importButton.disabled = true;
+    importStatus.textContent = '正在解析并建立论文索引，请稍候……';
+    try {
+      const response = await fetch('/research/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/pdf',
+          'X-Research-Token': token,
+          'X-Confirm-Embedding': 'true',
+          'X-Paper-Filename': encodeURIComponent(file.name),
+        },
+        body: file,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || '导入失败');
+      const option = document.createElement('option');
+      option.value = data.thread_id;
+      option.textContent = data.title;
+      paper.add(option, 2);
+      paper.value = data.thread_id;
+      importStatus.textContent = `已导入《${data.title}》：${data.page_count} 页、${data.chunk_count} 个片段。现在可以提问。`;
+      $('pdf').value = '';
+    } catch (error) {
+      importStatus.textContent = `导入失败：${error.message}`;
+    } finally {
+      importButton.disabled = false;
+    }
+  });
+
+  submit.addEventListener('click', async () => {
+    const token = $('token').value.trim();
+    const question = $('question').value.trim();
+    if (!token || !question || !paper.value) {
+      status.textContent = '请填写 Token、选择论文（或明确选择通用知识）并输入问题。';
+      return;
+    }
+    submit.disabled = true;
+    status.textContent = '正在分析，请稍候……';
+    $('result').hidden = true;
+    try {
+      const response = await fetch('/research/adaptive', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Research-Token': token},
+        body: JSON.stringify({
+          question,
+          thread_id: paper.value === '__general__' ? '' : paper.value,
+          strategy: $('strategy').value,
+          answer_depth: $('depth').value,
+          confirm_external_processing: true,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || '请求失败');
+      renderAnswer(data.answer);
+      renderSources(data.sources);
+      $('suggestion').hidden = !data.suggestion;
+      $('suggestion').textContent = data.suggestion || '';
+      $('result').hidden = false;
+      status.textContent = data.status === 'ok_with_limits'
+        ? '核心问题已回答；论文仍有边界说明。'
+        : data.status === 'insufficient'
+          ? '核心问题仍缺少论文证据。'
+          : data.status === 'stopped' || data.status === 'error'
+            ? `分析未完成。请求编号：${data.request_id || '未知'}`
+            : '分析完成。';
+    } catch (error) {
+      status.textContent = `失败：${error.message}`;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  loadPapers();
+</script>
+</body>
+</html>

@@ -60,6 +60,25 @@ def init_db():
       "CREATE INDEX IF NOT EXISTS idx_request_metrics_created_at "
       "ON request_metrics(created_at DESC)"
     )
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS adaptive_turns(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id TEXT NOT NULL UNIQUE,
+        thread_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      """
+    )
+    conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_adaptive_turns_thread_id "
+      "ON adaptive_turns(thread_id,id DESC)"
+    )
     conn.commit()
   finally:
     conn.close()
@@ -129,6 +148,64 @@ def list_sessions()->list[dict]:
     conn.close()
 
 
+def session_exists(thread_id: str) -> bool:
+  """Return whether the server already knows this single-user local thread."""
+  conn=get_db_connection()
+  try:
+    return conn.execute("SELECT 1 FROM sessions WHERE thread_id=?", (thread_id,)).fetchone() is not None
+  finally:
+    conn.close()
+
+
+def record_adaptive_turn(turn: dict) -> None:
+  """Persist bounded conversational memory without duplicating paper text."""
+  required = ("request_id", "thread_id", "question", "answer", "strategy", "mode", "status")
+  if any(not isinstance(turn.get(name), str) or not turn[name].strip() for name in required):
+    raise ValueError("invalid_adaptive_turn")
+  conn=get_db_connection()
+  try:
+    conn.execute(
+      """
+      INSERT INTO adaptive_turns(
+        request_id,thread_id,question,answer,strategy,mode,status,created_at
+      ) VALUES(?,?,?,?,?,?,?,?)
+      """,
+      (
+        turn["request_id"], turn["thread_id"], turn["question"][:4000],
+        turn["answer"][:8000], turn["strategy"], turn["mode"], turn["status"],
+        datetime.now().isoformat(),
+      ),
+    )
+    # Keep local memory bounded per paper thread.
+    conn.execute(
+      "DELETE FROM adaptive_turns WHERE thread_id=? AND id NOT IN ("
+      "SELECT id FROM adaptive_turns WHERE thread_id=? ORDER BY id DESC LIMIT 20"
+      ")",
+      (turn["thread_id"], turn["thread_id"]),
+    )
+    conn.commit()
+  finally:
+    conn.close()
+
+
+def list_adaptive_turns(thread_id: str, limit: int = 4) -> list[dict]:
+  """Return recent turns in chronological order for the next model request."""
+  if not isinstance(limit, int) or limit <= 0:
+    return []
+  conn=get_db_connection()
+  try:
+    rows=conn.execute(
+      """
+      SELECT request_id,thread_id,question,answer,strategy,mode,status,created_at
+      FROM adaptive_turns WHERE thread_id=? ORDER BY id DESC LIMIT ?
+      """,
+      (thread_id, min(limit, 8)),
+    ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+  finally:
+    conn.close()
+
+
 def delete_session(thread_id:str)->bool:
   """
   删除指定会话
@@ -137,6 +214,7 @@ def delete_session(thread_id:str)->bool:
   """
   conn=get_db_connection()
   try:
+    conn.execute("DELETE FROM adaptive_turns WHERE thread_id=?",(thread_id,))
     cursor=conn.execute("DELETE FROM sessions WHERE thread_id=?",(thread_id,))
     conn.commit()
     return cursor.rowcount>0  #受影响行数>0 表示删除了记录
