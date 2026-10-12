@@ -15,6 +15,27 @@ from tests.test_paper_structure import Model, ROWS
 
 
 class ReadingRegressionTests(unittest.TestCase):
+    def test_advanced_full_and_rag_writer_caps_are_6400_without_more_calls(self):
+        from deep_research import run_deep_research
+        from tests.test_deep_research import FakeModel, FakeRetriever
+        full = Model()
+        run_adaptive_research("Explain", "paper", ROWS, None, full,
+                              strategy="deep", answer_depth="advanced", enable_quality_review=False)
+        self.assertEqual(len(full.calls), 1)
+        self.assertEqual(full.calls[0][2]["max_output_tokens"], 6400)
+        rag = FakeModel()
+        run_deep_research("Explain", "thread", FakeRetriever(), rag, answer_depth="advanced")
+        self.assertEqual(len(rag.calls), 3)
+        self.assertEqual(next(c[2] for c in rag.calls if c[0] == "final"), 6400)
+
+    def test_old_home_and_research_page_are_distinct_entry_points(self):
+        root = Path(__file__).resolve().parents[1] / "static"
+        home = (root / "index.html").read_text(encoding="utf-8")
+        research = (root / "research.html").read_text(encoding="utf-8")
+        self.assertIn("/chat", home)
+        self.assertIn("/research/adaptive", research)
+        self.assertNotIn("/research/adaptive", home)
+
     def test_uninitialized_client_cannot_fall_back_to_real_environment(self):
         model = AliyunResearchModel.__new__(AliyunResearchModel)
         with patch("deep_research_runtime.build_chat_model") as factory:

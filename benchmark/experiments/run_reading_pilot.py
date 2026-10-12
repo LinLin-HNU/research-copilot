@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from adaptive_research import build_full_paper_context, run_adaptive_research
+from reading_limits import FULL_PAPER_OUTPUT_LIMITS
 
 
 def digest(value):
@@ -109,7 +110,7 @@ def prepare(cases_path, db, output):
                 "history_mode": "fresh", "depth": "advanced", "strategies": ["direct", "structured"],
                 "max_model_calls_total": 6, "max_model_calls_per_case": 3,
                 "model": settings.name, "provider_host": settings.host,
-                "retries": 0, "writer_output_limit": 3600}
+                "retries": 0, "writer_output_limit": FULL_PAPER_OUTPUT_LIMITS["advanced"]}
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"status": "prepared", "network_calls": 0, "case_count": 2,
             "paper_chars": {row["id"]: row["context_chars"] for row in frozen}, "max_paid_model_calls": 6}
@@ -149,6 +150,8 @@ def run(output, case_id, confirmed, *, model_factory=None):
     attempt = output / f"{case_id}_attempt.json"
     if attempt.exists():
         raise ValueError("This case was already attempted; automatic repeats are forbidden")
+    if manifest.get("writer_output_limit") != FULL_PAPER_OUTPUT_LIMITS["advanced"]:
+        raise ValueError("Frozen pilot output limit differs from current code; prepare a new pilot")
     journal = {"case": case_id, "max_calls": 3, "status": "started",
                "started_at": utc_now(), "pid": os.getpid(), "attempted_calls": 0,
                "completed_variants": [], "calls": []}

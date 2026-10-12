@@ -9,6 +9,18 @@ from tests.test_paper_structure import Model, ROWS
 
 
 class ReadingPilotTests(unittest.TestCase):
+    def test_old_output_budget_manifest_cannot_silently_use_new_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = self.prepare_fixture(Path(temp))
+            manifest_path = output / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["writer_output_limit"], 6400)
+            manifest["writer_output_limit"] = 3600
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "output limit differs"):
+                run(output, "autoformer", True, model_factory=Model)
+            self.assertFalse((output / "autoformer_attempt.json").exists())
+
     def prepare_fixture(self, path):
         cases = [{"id": "sundial", "thread_id": "paper", "question": "Explain"},
                  {"id": "autoformer", "thread_id": "paper2", "question": "Explain"}]

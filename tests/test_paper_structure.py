@@ -57,7 +57,7 @@ class PaperStructureTests(unittest.TestCase):
         self.assertEqual(model.calls[1][1]["reading_brief"]["method_components"][0]["input"], "unknown")
         self.assertEqual(result["model_calls"], 2)
         self.assertEqual(result["input_tokens"], 20)
-        self.assertEqual([call[2]["max_output_tokens"] for call in model.calls], [2200, 3600])
+        self.assertEqual([call[2]["max_output_tokens"] for call in model.calls], [2200, 6400])
         self.assertEqual(trace["quality_review"]["status"], "disabled")
         self.assertFalse(trace["structure_checks"]["semantic_accuracy_proven"])
 

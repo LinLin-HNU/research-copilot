@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 from quality_review import add_usage, cache_total, review_once
+from reading_limits import FULL_PAPER_OUTPUT_LIMITS
 
 
 @dataclass(frozen=True)
@@ -519,7 +520,7 @@ def run_adaptive_research(
         if brief is not None:
             payload["reading_brief"] = brief
         data = full_call("structured_context" if brief is not None else "full_context", payload,
-                         {"concise": 1200, "beginner": 2600, "advanced": 3600}[answer_depth])
+                         FULL_PAPER_OUTPUT_LIMITS[answer_depth])
         seen = {item["id"]: item for item in evidence}
         final, coverage, caveats, structured = _normalize_final_contract(
             data, [{"id": "q1", "text": question}], seen, True

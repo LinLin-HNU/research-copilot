@@ -35,7 +35,7 @@ class CompactReadingTests(unittest.TestCase):
                         strategy="deep", answer_depth="advanced", explanation_pipeline="structured")
         self.assertEqual([c[0] for c in model.calls], ["source_structure", "structured_context"])
         self.assertTrue(result["reading_brief_used"])
-        self.assertEqual([c[2]["max_output_tokens"] for c in model.calls], [2200, 3600])
+        self.assertEqual([c[2]["max_output_tokens"] for c in model.calls], [2200, 6400])
         self.assertIn("[s1 |", model.calls[0][1]["paper_context"])
         self.assertIn("[c1 |", model.calls[1][1]["paper_context"])
         self.assertEqual(model.calls[1][1]["reading_brief"]["evidence"]["e1"]["id"], "c1")

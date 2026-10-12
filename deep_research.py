@@ -16,6 +16,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from reading_limits import RAG_PAPER_OUTPUT_LIMITS
 
 
 SKIP_SECTIONS = {"references", "reference", "appendix", "bibliography"}
@@ -785,7 +786,7 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                                    "assessments": assessments, "evidence": segments.copy(),
                                    "stop_reason": stop_reason,
                                    "answer_depth": answer_depth},
-                         {"concise": 1200, "beginner": 2400, "advanced": 3000}[answer_depth])
+                         RAG_PAPER_OUTPUT_LIMITS[answer_depth])
             final, coverage, caveats, structured_coverage = _normalize_final_contract(
                 final, questions, seen, True
             )
