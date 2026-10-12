@@ -211,6 +211,8 @@ def public_research_result(result: dict) -> dict:
             "provider_request_rejected": "模型服务拒绝了请求，请联系管理员检查模型权限、密钥或调用限制。",
             "output_token_limit": "本次讲解输出达到长度上限，请缩小问题范围或联系管理员检查输出预算。",
         }.get(result.get("stop_reason"), "请重试；如果再次出现，请把请求编号交给管理员查看运行记录。")
+    elif result.get("stop_reason") == "output_token_limit_partial":
+        public["suggestion"] = "已保留部分回答；可针对未展开的部分继续追问，无需重复请求整篇讲解。"
     return public
 
 
@@ -486,6 +488,14 @@ def run_adaptive_research(
         if clock() - started > 120:
             raise WorkflowStop("deadline")
         if response.get("parse_error") or response.get("data") is None:
+            if stage in {"full_context", "structured_context"}:
+                from partial_output import recover_final
+                recovered, recovery = recover_final(response, {row["id"]: row for row in evidence})
+                if recovery is not None:
+                    trace["output_recovery"] = recovery
+                    trace["events"].append({"step": "output_recovery", **recovery})
+                if recovered is not None:
+                    return recovered
             raise WorkflowStop(str(response.get("parse_error") or "invalid_model_response"))
         return response["data"]
 
@@ -527,7 +537,12 @@ def run_adaptive_research(
         )
         answer, claims, unresolved = _render_final(final, seen, True)
         sources = _build_public_sources(claims, seen)
-        if unresolved:
+        if trace.get("output_recovery", {}).get("retained_items", 0):
+            from partial_output import TRUNCATION_NOTICE
+            unresolved = [TRUNCATION_NOTICE]
+            answer += "\n\n### 本次输出未完成\n- " + TRUNCATION_NOTICE
+            status, stop_reason = "partial", "output_token_limit_partial"
+        elif unresolved:
             status = "insufficient" if structured else "partial"
             stop_reason = "full_context_incomplete"
         elif structured and caveats:
@@ -553,6 +568,7 @@ def run_adaptive_research(
     quality_report = review_once(
         model, question, answer, evidence, trace,
         enabled=enable_quality_review and explanation_pipeline != "structured"
+        and not trace.get("output_recovery")
         and status in {"ok", "ok_with_limits", "partial", "insufficient"},
     )
     trace["cached_tokens"] = cache_total(trace)

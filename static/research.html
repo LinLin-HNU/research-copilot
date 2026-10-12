@@ -226,6 +226,8 @@
         ? '核心问题已回答；论文仍有边界说明。'
         : data.status === 'insufficient'
           ? '核心问题仍缺少论文证据。'
+          : data.status === 'partial'
+            ? '已返回部分回答，请查看未完成说明；可继续追问。'
           : data.status === 'stopped' || data.status === 'error'
             ? `分析未完成。请求编号：${data.request_id || '未知'}`
             : '分析完成。';

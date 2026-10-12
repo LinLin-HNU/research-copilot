@@ -656,6 +656,14 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
               finish_reason=response.get("finish_reason"), output_limit_reached=response.get("output_limit_reached"),
               output_budget_exceeded=response.get("output_budget_exceeded"))
         if response.get("parse_error"):
+            if stage == "final":
+                from partial_output import recover_final
+                recovered, recovery = recover_final(response, {row["id"]: row for row in segments})
+                if recovery is not None:
+                    trace["output_recovery"] = recovery
+                    event("output_recovery", **recovery)
+                if recovered is not None:
+                    return recovered
             raise WorkflowStop(str(response["parse_error"]))
         if "data" not in response or response["data"] is None:
             raise WorkflowStop("invalid_model_response")
@@ -796,7 +804,12 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
         # writer later admits that evidence is missing.  At that point the
         # three-call budget is exhausted, so fail visibly instead of reporting
         # a misleading successful completion.
-        if mode == "paper_deep" and unresolved:
+        if trace.get("output_recovery", {}).get("retained_items", 0):
+            from partial_output import TRUNCATION_NOTICE
+            unresolved = [TRUNCATION_NOTICE]
+            answer += "\n\n### 本次输出未完成\n- " + TRUNCATION_NOTICE
+            status, stop_reason = "partial", "output_token_limit_partial"
+        elif mode == "paper_deep" and unresolved:
             postcheck_reason = (
                 "final_unresolved_after_supported_stop"
                 if stop_reason == "model_stop"
@@ -830,6 +843,7 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
     quality_report = review_once(
         model, question, answer, segments, trace,
         enabled=enable_quality_review and mode == "paper_deep"
+        and not trace.get("output_recovery")
         and status in {"ok", "ok_with_limits", "partial", "insufficient"},
     )
     trace["cached_tokens"] = cache_total(trace)
