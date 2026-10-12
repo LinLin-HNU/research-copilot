@@ -80,6 +80,8 @@ class CompactReadingTests(unittest.TestCase):
         from langchain_core.messages import AIMessage
         model = AliyunResearchModel.__new__(AliyunResearchModel)
         model._key, model._base = "fake", "https://example.invalid"
+        from research_model_settings import ResearchModelSettings
+        model._settings = ResearchModelSettings("test-model", model._base, model._key)
         with patch("langchain_openai.ChatOpenAI") as client:
             client.return_value.invoke.return_value = AIMessage(
                 content='{"broken":', response_metadata={"finish_reason": "length"})

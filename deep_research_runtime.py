@@ -300,10 +300,17 @@ class AliyunResearchModel:
     def _package_response(cls, raw: str, usage: dict, *, finish_reason=None, max_output_tokens=None) -> dict:
         """Preserve provider output and billing metadata even when JSON is invalid."""
         metadata = {"finish_reason": finish_reason,
+                    "output_budget_exceeded": isinstance(max_output_tokens, int) and
+                    isinstance(usage.get("output_tokens"), int) and usage["output_tokens"] > max_output_tokens,
                     "output_limit_reached": isinstance(max_output_tokens, int) and
                     isinstance(usage.get("output_tokens"), int) and usage["output_tokens"] >= max_output_tokens}
         if finish_reason == "length":
             return {"data": None, "raw": raw, "usage": usage, "parse_error": "output_token_limit", **metadata}
+        if metadata["output_budget_exceeded"]:
+            # Already-paid raw output stays available in the private trace.
+            # Do not silently continue into another paid stage after a breach.
+            return {"data": None, "raw": raw, "usage": usage,
+                    "parse_error": "provider_output_budget_exceeded", **metadata}
         try:
             data = cls._parse_json(raw)
         except WorkflowStop as exc:
@@ -356,8 +363,11 @@ class AliyunResearchModel:
     def call(self, stage: str, payload: dict, *, max_output_tokens: int,
              timeout_seconds: float) -> dict:
         from langchain_core.messages import HumanMessage, SystemMessage
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            raise RuntimeError("Research client configuration missing; initialize the client explicitly")
         model = build_chat_model(
-            settings=getattr(self, "_settings", None) or resolve_research_model(),
+            settings=settings,
             max_output_tokens=max_output_tokens, timeout_seconds=timeout_seconds,
         )
         system_message = SystemMessage(content=(

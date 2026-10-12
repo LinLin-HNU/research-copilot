@@ -69,7 +69,7 @@ class ResearchModelSettingsTests(unittest.TestCase):
         model._settings = resolve_research_model({"OPENAI_BASE_URL": "https://api.deepseek.com",
                             "MODEL_NAME": "deepseek-flash", "DEEPSEEK_API_KEY": "test-key"})
         model._key, model._base = model._settings.api_key, model._settings.base_url
-        with patch("langchain_openai.ChatOpenAI") as client:
+        with patch("provider_chat_model.DeepSeekChatOpenAI") as client:
             client.return_value.invoke.return_value = AIMessage(content='{"items":[],"unresolved":[]}',
                                                                 response_metadata={"finish_reason": "stop"})
             response = model.call("general", {"question": "test"}, max_output_tokens=50, timeout_seconds=1)

@@ -532,7 +532,11 @@ def _render_final(data: Any, seen: dict[str, dict], paper_mode: bool) -> tuple[s
         raise WorkflowStop("invalid_final_answer")
     lines, claims = [], []
     current_heading = None
-    for item in data["items"][:12]:
+    # Bound malformed/oversized responses explicitly; never silently discard
+    # valid later claims (which may contain the experiment results).
+    if len(data["items"]) > 64:
+        raise WorkflowStop("final_item_budget")
+    for item in data["items"]:
         if not isinstance(item, dict) or item.get("kind") not in KINDS:
             raise WorkflowStop("invalid_final_answer")
         kind = item["kind"]
@@ -648,7 +652,8 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
             trace["cache_usage_missing_calls"] = trace.get("cache_usage_missing_calls", 0) + 1
         event("model", stage=stage, raw=response.get("raw"), data=response.get("data"), usage=usage,
               parse_error=response.get("parse_error"), request_meta=response.get("request_meta"),
-              finish_reason=response.get("finish_reason"), output_limit_reached=response.get("output_limit_reached"))
+              finish_reason=response.get("finish_reason"), output_limit_reached=response.get("output_limit_reached"),
+              output_budget_exceeded=response.get("output_budget_exceeded"))
         if response.get("parse_error"):
             raise WorkflowStop(str(response["parse_error"]))
         if "data" not in response or response["data"] is None:

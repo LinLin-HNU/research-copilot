@@ -45,7 +45,11 @@ def build_chat_model(*, max_output_tokens, timeout_seconds, settings=None):
     from langchain_openai import ChatOpenAI
 
     selected = settings or resolve_research_model()
-    return ChatOpenAI(
+    client_type = ChatOpenAI
+    if selected.host == "api.deepseek.com":
+        from provider_chat_model import DeepSeekChatOpenAI
+        client_type = DeepSeekChatOpenAI
+    return client_type(
         model=selected.name, api_key=selected.api_key,
         base_url=selected.base_url, temperature=0,
         timeout=timeout_seconds, max_tokens=max_output_tokens,

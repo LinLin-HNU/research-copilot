@@ -222,6 +222,7 @@ def run(output, case_id, confirmed, *, model_factory=None):
                               "output_tokens": result["output_tokens"], "elapsed_ms": result["elapsed_ms"],
                               "stop_reason": result.get("stop_reason"),
                               "reading_brief_used": result.get("reading_brief_used", False),
+                              "reading_brief_completeness": result.get("reading_brief_completeness"),
                               "structure_fallback_reason": result.get("structure_fallback_reason")}), flush=True)
             if result["status"] in {"stopped", "error"}:
                 journal["stop_reason"] = result.get("stop_reason")
@@ -231,6 +232,7 @@ def run(output, case_id, confirmed, *, model_factory=None):
         summary = {"status": status, "case": case_id, "attempted_calls": bounded.calls,
                    "quality_improvement": "not_yet_reviewed", "automatic_rewrites": 0,
                    "structured_effective": bool(results.get("structured", {}).get("reading_brief_used")),
+                   "reading_brief_completeness": results.get("structured", {}).get("reading_brief_completeness"),
                    "structure_fallback_reason": results.get("structured", {}).get("structure_fallback_reason")}
         save_json(output / f"{case_id}_summary.json", summary)
         journal["status"] = status

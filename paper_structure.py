@@ -31,6 +31,8 @@ def validate_compact_structure(data, evidence, aliases):
             continue
         key, ref, quote = row.get("key"), row.get("ref"), row.get("quote")
         if not all(isinstance(x, str) and x.strip() for x in (key, ref, quote)) or len(key) > 8 or len(quote) > 160:
+            if isinstance(quote, str) and len(quote) > 160:
+                decision.update(reason="quote_length_exceeded", actual_chars=len(quote), max_chars=160)
             continue
         if key in sources:
             return None, {**report, "reason": "duplicate_evidence_key"}
@@ -80,7 +82,27 @@ def validate_compact_structure(data, evidence, aliases):
     result["unconfirmed"] = unknown
     if not report["accepted_rows"] or (data["paper_type"] == "method" and not result["components"]):
         return None, {**report, "reason": "no_valid_structure"}
-    return result, {**report, "reason": "structure_available_not_semantically_verified"}
+    counts = {group: {"proposed": len(data[group]), "accepted": len(result[group])}
+              for group in ("components", "relations", "experiments", "limitations")}
+    counts["evidence"] = {"proposed": len(data["evidence"]), "accepted": len(sources)}
+    # These are transport/organization checks, NOT semantic sufficiency checks.
+    core = [row for row in result["components"] if row["stage"] not in {"engineering", "other"}]
+    core_names = {row["name"] for row in core}
+    core_relations = [row for row in result["relations"]
+                      if row["from"] in core_names and row["to"] in core_names]
+    missing = []
+    if data["paper_type"] == "method":
+        if len(core) < 2:
+            missing.append("core_component_chain")
+        if not core_relations:
+            missing.append("core_component_relation")
+    rejected = any(not row["accepted"] for row in report["decisions"])
+    completeness = "partial" if rejected or missing else "complete"
+    result["validation_status"] = {"completeness": completeness, "missing": missing,
+                                   "semantic_accuracy_proven": False}
+    return result, {**report, "reason": "structure_available_not_semantically_verified",
+                    "counts": counts, "completeness": completeness, "missing": missing,
+                    "usable_for_structured_writer": not missing}
 
 
 LIMITS = {"method_components": 12, "method_flow": 12, "experiment_evidence": 6,

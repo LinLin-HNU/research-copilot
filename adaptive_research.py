@@ -480,6 +480,7 @@ def run_adaptive_research(
         add_usage(trace, usage)
         event.update(raw=response.get("raw"), data=response.get("data"), usage=usage,
                      parse_error=response.get("parse_error"), finish_reason=response.get("finish_reason"),
+                     output_budget_exceeded=response.get("output_budget_exceeded"),
                      output_limit_reached=response.get("output_limit_reached"))
         if clock() - started > 120:
             raise WorkflowStop("deadline")
@@ -498,12 +499,17 @@ def run_adaptive_research(
                                       "question": question, "answer_depth": answer_depth}, 2200)
                 brief, checks = validate_structure(extracted, evidence, aliases)
                 trace["structure_checks"] = checks
+                trace["reading_brief_candidate"] = brief
+                if brief is not None and checks.get("usable_for_structured_writer") is False:
+                    trace["structure_fallback_reason"] = "incomplete_core_structure"
+                    brief = None
                 trace["reading_brief"] = brief
                 if brief is None:
-                    trace["structure_fallback_reason"] = checks["reason"]
+                    trace.setdefault("structure_fallback_reason", checks["reason"])
             except WorkflowStop as exc:
                 trace["structure_fallback_reason"] = exc.reason
-                if exc.reason in {"provider_quota_exhausted", "provider_request_rejected"}:
+                if exc.reason in {"provider_quota_exhausted", "provider_request_rejected",
+                                   "provider_output_budget_exceeded"}:
                     raise  # Authentication/quota/rate rejection cannot benefit from a writer call.
             trace["events"].append({"step": "structure_validation", "brief": brief,
                                     "checks": trace.get("structure_checks"),
@@ -553,6 +559,7 @@ def run_adaptive_research(
         event.get("stage") == "structured_context" for event in trace["events"])
     trace.update({
         "reading_brief_used": brief_used,
+        "reading_brief_completeness": (trace.get("structure_checks") or {}).get("completeness"),
         "quality_review": quality_report,
         "status": status,
         "stop_reason": stop_reason,
@@ -576,6 +583,7 @@ def run_adaptive_research(
         "answer_depth": answer_depth,
         "explanation_pipeline": explanation_pipeline,
         "reading_brief_used": brief_used,
+        "reading_brief_completeness": (trace.get("structure_checks") or {}).get("completeness"),
         "structure_fallback_reason": trace.get("structure_fallback_reason"),
         "status": status,
         "stop_reason": stop_reason,
