@@ -173,7 +173,7 @@ class AliyunResearchModel:
                                 "关系只表达有依据的连接，不把训练损失当推理步骤；综述/理论采用其自身结构，不强套网络。"
                                 "摘录和组件可复用，减少重复；未读其他论文不得断言继承关系。",
             "structured_context": "根据原论文和经格式/来源检查的资料表，生成一次自然的深入讲解。资料表仍可能理解错误，必须以原文为准。"
-                                  "先说明任务和动机，再把核心方法如何连接讲清，区分训练与推理、输入与输出；工程加速不能代替核心方法解释。"
+                                  "按本轮问题组织方法说明，区分训练与推理、输入与输出；工程加速不能代替核心方法解释。"
                                   "未知维度和机制不能用常识编造。综述和理论论文采用其自身组织结构。必要时使用公式、直觉例子和小标题。"
                                   "实验交代对照、条件、指标、差距与有限结论；作者事实、实验观察、教学解释、跨论文推断要区分。"
                                   "只有明确原文依据才能写技术继承或强因果。不能因资料表没找到就声称论文没有说明。"
@@ -196,22 +196,25 @@ class AliyunResearchModel:
                     "若用户提到以前读过的论文，只把它们视为讲解背景；不得预设本论文统一、继承或优于它们，"
                     "也不得将未要求的跨论文定量对比列为本篇论文的必答事实。",
             "assess": "阅读给出的论文片段并提出可检查的建议；你的充分性判断可能出错。仅输出JSON："
-                      '{"subquestions":[{"subquestion_id":"q1","assessment":"supported|missing_specific_fact|truncated_context|conflicting_evidence|unknown",'
+                      '{"subquestions":[{"subquestion_id":"q1","assessment":"supported|refuted_premise|missing_specific_fact|truncated_context|conflicting_evidence|unknown",'
                       '"evidence_ids":[],"reason":"简短理由","missing_information":"具体缺什么或空字符串"}],'
                       '"action":{"type":"search|expand|stop","query":"...","target_id":"...","direction":"continue|next|previous"}}。'
                       "只能引用输入中实际出现的证据ID。若建议继续，必须指出具体缺失信息。"
+                      "证据足以反驳用户错误前提用refuted_premise，引用证据并解释反驳依据，missing_information可为空；"
+                      "conflicting_evidence仅用于已见论文证据内部互相矛盾，不用于论文与用户说法不一致。"
+                      "停止补查不等于停止回答；允许承认缺口后停止补查。"
                       "reason 和 missing_information 各用一句话，避免冗长描述挤占JSON输出预算。"
                       "supported 表示当前证据已经足以回答用户要求，此时 missing_information 必须为空；"
-                      "只要填写了缺失信息，就不得标 supported 或选择 stop。不要追查用户未要求的次要超参数。"
+                      "填写缺失信息时不得标supported，但可选择stop并由最终回答披露缺口；不要追查用户未要求的次要超参数。"
                       "证据段的 has_more_before/has_more_after 表示同一原始块是否还有未展示内容；"
                       "expand continue 只适用于当前片段末尾的同一句、同一公式或同一小节明显被截断，且所缺概念已在截断边界附近出现；"
                       "如果缺的是另一概念、另一小节或当前片段只说稍后讨论，应选择 search 并用 missing_information 生成聚焦查询，"
                       "不能仅因 has_more_after=true 就连续展开当前块。不得假定未展示部分已经支持答案。",
             "final": "只根据给定片段回答本轮问题；论文事实必须引用已见ID，教学解释或推断标为inference。"
-                     "必须遵循输入 answer_depth：concise 直接回答；beginner 假设读者从未读过论文，先解释任务背景和旧方法痛点，"
-                     "再对每项核心贡献分别说明‘它是什么、如何工作、解决什么问题’，最后说明各贡献如何组成完整方案；"
-                     "advanced 在 beginner 基础上补充公式、实现细节、实验依据和局限。"
-                     "beginner 或 advanced 不得只罗列术语或把多个贡献压缩在一个项目中；通常为每项核心贡献使用独立小标题和至少两条解释。"
+                     "依据原文与必要的领域理解判断用户前提，可由输入输出设计推断是否成立，不要求作者逐字写出否定句；推断须标inference。"
+                     "blocked_subquestions中列出的子问题不作为已核验问题回答；若assessment_unavailable为true，只基于已见证据作有限解释，不能声称评估已经通过。"
+                     "有缺口也应输出有依据的部分，不因某个缺口把其他问题留空；不要用常识编造缺失的论文细节。"
+                     "遵循输入 answer_depth，但深度不等于强制增加公式、背景或无关实验。"
                      "回答按用户真正需要的教学链组织，可使用公式和直觉类比，避免机械重复和无信息量扩写。仅输出JSON："
                      '{"items":[{"heading":"小标题","kind":"paper_fact|inference|background","text":"...",'
                      '"evidence_ids":["已见ID"]}],'
@@ -226,14 +229,11 @@ class AliyunResearchModel:
                        "如果问题要求讲解某篇具体论文，应明确这是基于通用知识的说明而非论文原文核验。仅输出JSON："
                        '{"items":[{"heading":"小标题","kind":"background|inference","text":"...","evidence_ids":[]}],"unresolved":[]}。',
             "full_context": "本题已提供一篇论文的完整解析文本。只根据给定论文陈述论文事实，教学解释或推断必须标为inference。"
-                            "必须遵循输入 answer_depth：concise 直接回答；beginner 假设读者从未读过论文，先解释任务背景和旧方法痛点，"
-                            "再对每项核心贡献分别说明‘它是什么、如何工作、解决什么问题’，最后说明各贡献如何组成完整方案；"
-                            "advanced 在 beginner 基础上补充公式、实现细节、实验依据和局限。"
+                            "遵循输入 answer_depth，但深度不等于强制增加公式、背景或无关实验。"
                             "深入方法解释应按输入、预处理/表示、核心组件、训练目标、推理过程、最终输出串联；原文未报告的shape或细节不得编造。"
                             "实验需说明对照对象、条件、指标和数字支持的具体结论；只有明确依据才用‘继承自’或强因果词。"
                             "近期回答可能含错误，必须重新以论文为依据；不得直接复用其中的事实或‘论文未说明’断言。"
-                            "beginner 或 advanced 不得只罗列术语或把多个贡献压缩在一个项目中；通常为每项核心贡献使用独立小标题和至少两条解释。"
-                            "按总定位、问题与动机、方法与实现、为什么有效、实验与局限组织自然讲解；可使用小标题、公式和直觉例子。"
+                            "围绕本轮问题组织自然讲解，使用小标题与必要的直觉例子，不机械套用完整论文目录。"
                             "仅输出JSON："
                             '{"items":[{"heading":"小标题","kind":"paper_fact|inference|background","text":"...",'
                             '"evidence_ids":["已见ID"]}],'
@@ -247,6 +247,21 @@ class AliyunResearchModel:
         }
         if stage not in instructions:
             raise ValueError("Unknown model stage")
+        if stage == "plan":
+            return instructions[stage] + "局部机制追问只规划本轮机制，不主动加入背景介绍、额外实验或公式推导。"
+        if stage in {"final", "full_context", "structured_context"}:
+            return instructions[stage] + (
+                "讲解风格约束：以用户本轮明确要求优先，不新增工具或循环。"
+                "整体讲解（如讲解这篇论文、概述主要贡献）：按问题→核心机制→输入输出流程→少量关键实验组织；"
+                "理论解释优先，讲清它是什么、如何工作、解决什么问题，不得只罗列术语。综述/理论论文采用适合其类型的结构。"
+                "局部追问（如深入解释某个模块、具体机制）：直接进入该机制，背景最多一句；不重讲整篇论文贡献或无关实验。"
+                "公式默认解释各项含义和作用，只有用户明确要求推导/数学细节时才展开推导。"
+                "concise简要直答；beginner假设读者从未读过论文，用通俗语言和必要例子，但局部追问仍不重讲整篇背景；"
+                "advanced深入机制与各环节关系，不默认增加公式推导。"
+                "教学类比不是作者实验结论，要标inference；通用背景标background，不得伪装为paper_fact。"
+                "没检索到应写当前证据未覆盖，不能写论文未说明；caveats同样遵守这一要求。"
+                "每条text建议不超过900字符，长机制拆成多条；单条heading不超过80字符。"
+            )
         return instructions[stage]
 
     @staticmethod

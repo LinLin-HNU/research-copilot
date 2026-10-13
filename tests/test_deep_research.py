@@ -226,19 +226,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((postcheck["allowed"], postcheck["reason"]),
                          (False, "final_unresolved_after_supported_stop"))
 
-    def test_supported_with_explicit_gap_cannot_stop_and_uses_guard_fallback(self):
+    def test_supported_with_explicit_gap_stops_retrieval_but_still_writes(self):
         contradictory = assessment({"type": "stop"}, state="supported")
         contradictory["subquestions"][0]["missing_information"] = "移动平均分解公式"
         retriever = FakeRetriever()
-        model = FakeModel(assessment_data=contradictory)
+        model = FakeModel(assessment_data=contradictory, final_data={"items": [
+            {"kind": "paper_fact", "text": "首轮证据可支持的部分", "evidence_ids": ["thread_1"]}]})
         with tempfile.TemporaryDirectory(dir=TEST_TMP) as tmp:
             result = run_deep_research("分解操作？", "thread", retriever, model, trace_dir=Path(tmp))
             saved = json.loads((Path(tmp) / f"{result['request_id']}.json").read_text(encoding="utf-8"))
-        self.assertEqual((result["actions"], result["stop_reason"]), (2, "followup_executed"))
+        self.assertEqual((result["actions"], result["stop_reason"]), (1, "model_stop"))
         assessment_event = next(e for e in saved["events"] if e["step"] == "assessment")
         self.assertEqual(assessment_event["subquestions"][0]["normalized_from"], "supported")
         reasons = [e.get("reason") for e in saved["events"] if e["step"] == "gate"]
-        self.assertEqual(reasons, ["stop_with_explicit_gap", "guard_fallback_search"])
+        self.assertEqual(reasons, ["model_stop"])
+        self.assertEqual([call[0] for call in model.calls], ["plan", "assess", "final"])
 
     def test_low_yield_continuation_is_replaced_by_gap_search(self):
         retriever = FakeRetriever()
@@ -280,7 +282,7 @@ class WorkflowTests(unittest.TestCase):
                          ("ok_with_limits", "answer_with_caveats"))
         self.assertEqual(result["unresolved"], [])
         self.assertIn("### 方法与实现", result["answer"])
-        self.assertIn("### 论文未进一步说明", result["answer"])
+        self.assertIn("### 当前证据边界与待核实内容", result["answer"])
         self.assertNotIn("thread_2", result["answer"])
         self.assertEqual(result["sources"][0]["page_start"], 7)
 
@@ -495,10 +497,12 @@ class WorkflowTests(unittest.TestCase):
 
     def test_rejects_search_without_named_gap_and_deduplicates_same_excerpt(self):
         no_gap = assessment({"type": "search", "query": "再查"}, state="supported")
-        model = FakeModel(assessment_data=no_gap)
+        model = FakeModel(assessment_data=no_gap, final_data={"items": [
+            {"kind": "paper_fact", "text": "只答首轮已见事实", "evidence_ids": ["thread_1"]}]})
         result = run_deep_research("方法？", "thread", FakeRetriever(), model)
         self.assertEqual((result["status"], result["stop_reason"]),
-                         ("stopped", "missing_information_required"))
+                         ("partial", "assessment_validation_partial"))
+        self.assertEqual([c[0] for c in model.calls], ["plan", "assess", "final"])
 
         retriever = FakeRetriever()
         retriever.rows = [chunk("thread_1", "同一片段" * 50),

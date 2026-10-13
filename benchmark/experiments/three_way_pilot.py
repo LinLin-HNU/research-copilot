@@ -292,7 +292,7 @@ def render(output, batch, preview=False):
     return {"review_rows": len(sheet), "batch": batch, "automatic_quality_score": False}
 
 
-def smoke(output):
+def smoke(output, batch=1):
     """Execute all three branches with fake providers, frozen V1 definitions."""
     from adaptive_research import run_adaptive_research
     from deep_research import ChromaPaperRetriever
@@ -306,7 +306,7 @@ def smoke(output):
     shutil.copy2(output / "manifest.json", destination / "manifest.json")
     shutil.copy2(output / "legacy_sources.json", destination / "legacy_sources.json")
     real_load = legacy.load
-    for case in [c for c in manifest["cases"] if c["batch"] == 1]:
+    for case in [c for c in manifest["cases"] if c["batch"] == batch]:
         class FakeRAG:
             def __init__(self, *args):
                 pass
@@ -348,6 +348,11 @@ def smoke(output):
                 return {"data": data, "raw": json.dumps(data), "usage": {"input_tokens": 1, "output_tokens": 1, "cached_tokens": 0}}
         results = {"legacy_v1": old}
         for variant in ("adaptive", "direct_full"):
+            if variant == "direct_full" and not case["full_eligible"]:
+                results[variant] = {"status": "not_applicable", "model_calls": 0,
+                                    "stop_reason": "full_context_source_limit",
+                                    "answer": "全文组不适用：超过已冻结的输入范围。"}
+                continue
             model = FakeModel()
             result = run_adaptive_research(case["question"], case["thread_id"], case["rows"], ChromaPaperRetriever(FakeRAG()), model,
                            strategy="auto" if variant == "adaptive" else "deep", answer_depth="advanced", history_mode="fresh",
@@ -357,13 +362,13 @@ def smoke(output):
             results[variant] = result
         for variant, result in results.items():
             save_json(destination / f"{case['id']}_{variant}_result.json", {**result, "synthetic_only": True})
-    report = render(destination, 1)
+    report = render(destination, batch)
     report.update(synthetic_only=True, network_calls=0, frozen_v1_definitions_exercised=True)
     save_json(destination / "smoke_summary.json", report)
     return report
 
 
-def check_index(output):
+def check_index(output, batch=1):
     """Private snapshot retrieval with a stored vector, not an embedding API."""
     from benchmark.experiments.three_way_legacy import load
     manifest = checked_manifest(output)
@@ -376,7 +381,7 @@ def check_index(output):
     namespace, _, _, _ = load(sources, None, embed)
     rag = namespace["PaperRAG"](str(output / "chroma"))
     counts = []
-    for case in [c for c in manifest["cases"] if c["batch"] == 1]:
+    for case in [c for c in manifest["cases"] if c["batch"] == batch]:
         collection = rag.client.get_collection(f"paper_{case['thread_id']}")
         vector = collection.get(limit=1, include=["embeddings"])["embeddings"][0]
         seed[:] = [vector]
@@ -413,9 +418,9 @@ def main():
     elif args.mode == "run":
         result = run_batch(output, args.batch, args.confirm_paid)
     elif args.mode == "smoke":
-        result = smoke(output)
+        result = smoke(output, args.batch)
     elif args.mode == "check-index":
-        result = check_index(output)
+        result = check_index(output, args.batch)
     else:
         result = render(output, args.batch, preview=args.mode == "preview")
     print(json.dumps(result, ensure_ascii=False))

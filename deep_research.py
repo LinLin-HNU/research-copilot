@@ -20,7 +20,7 @@ from reading_limits import RAG_PAPER_OUTPUT_LIMITS
 
 
 SKIP_SECTIONS = {"references", "reference", "appendix", "bibliography"}
-ASSESSMENTS = {"supported", "missing_specific_fact", "truncated_context", "conflicting_evidence", "unknown"}
+ASSESSMENTS = {"supported", "refuted_premise", "missing_specific_fact", "truncated_context", "conflicting_evidence", "unknown"}
 ACTIONS = {"search", "expand", "stop"}
 DIRECTIONS = {"continue", "next", "previous"}
 KINDS = {"paper_fact", "inference", "background"}
@@ -374,7 +374,8 @@ def _assessment(data: Any, questions: list[dict], seen_ids: set[str]) -> tuple[l
         raise WorkflowStop("invalid_assessment")
     parsed = []
     for row in rows:
-        if not isinstance(row, dict) or row.get("assessment") not in ASSESSMENTS:
+        if (not isinstance(row, dict) or not isinstance(row.get("assessment"), str)
+                or row.get("assessment") not in ASSESSMENTS):
             raise WorkflowStop("invalid_assessment")
         ids = row.get("evidence_ids")
         if not isinstance(ids, list) or any(not isinstance(item, str) or item not in seen_ids for item in ids):
@@ -383,7 +384,9 @@ def _assessment(data: Any, questions: list[dict], seen_ids: set[str]) -> tuple[l
         missing = row.get("missing_information", "")
         if not isinstance(missing, str) or len(missing) > 500:
             raise WorkflowStop("invalid_missing_information")
-        if row["assessment"] != "supported" and not missing.strip():
+        if row["assessment"] == "refuted_premise" and not ids:
+            raise WorkflowStop("refutation_without_evidence")
+        if row["assessment"] not in {"supported", "refuted_premise"} and not missing.strip():
             raise WorkflowStop("missing_information_required")
         assessment_value = row["assessment"]
         normalized_from = None
@@ -412,20 +415,54 @@ def _assessment(data: Any, questions: list[dict], seen_ids: set[str]) -> tuple[l
             raise WorkflowStop("invalid_action")
         action = {"type": "expand", "target_id": target, "direction": action["direction"]}
     else:
-        question_text = {question["id"]: question["text"] for question in questions}
-        explicit_gaps = [
-            f"{question_text[row['subquestion_id']]} {row['missing_information']}"
-            for row in parsed if row["missing_information"]
-        ]
-        if explicit_gaps:
-            action = {
-                "type": "search",
-                "query": " ".join(explicit_gaps)[:240],
-                "_guard_override": "stop_with_explicit_gap",
-            }
-        else:
-            action = {"type": "stop"}
+        # A model stop ends retrieval, not writing. Explicit gaps remain visible
+        # to the final writer; the program must not invent a new search here.
+        action = {"type": "stop"}
     return parsed, action
+
+
+def _isolated_assessment(data, questions, seen_ids):
+    """Isolate protocol errors; provenance violations remain hard failures."""
+    if not isinstance(data, dict) or not isinstance(data.get("subquestions"), list):
+        fallback = [{"subquestion_id": q["id"], "assessment": "unknown", "evidence_ids": [],
+                     "reason": "评估协议不可用，仅允许基于已见证据有限回答", "missing_information": "评估未通过"}
+                    for q in questions]
+        blocked = [{"subquestion_id": q["id"], "question": q["text"], "reason": "invalid_assessment"}
+                   for q in questions]
+        return fallback, {"type": "stop"}, [], blocked, "assessment_unavailable"
+    rows = data["subquestions"]
+    valid, blocked = [], []
+    for question in questions:
+        matching = [r for r in rows if isinstance(r, dict) and r.get("subquestion_id") == question["id"]]
+        try:
+            if len(matching) != 1:
+                raise WorkflowStop("invalid_assessment")
+            parsed, _ = _assessment({"subquestions": matching, "action": {"type": "stop"}},
+                                     [question], seen_ids)
+        except WorkflowStop as exc:
+            if exc.reason == "foreign_or_unseen_evidence":
+                raise
+            blocked.append({"subquestion_id": question["id"], "question": question["text"],
+                            "reason": exc.reason})
+        else:
+            valid.extend(parsed)
+    if not valid:
+        # Still generate a bounded answer from already seen evidence, but do not
+        # reclassify malformed model assessments as semantically supported.
+        valid = [{"subquestion_id": q["id"], "assessment": "unknown", "evidence_ids": [],
+                  "reason": "评估协议不可用，仅允许基于已见证据有限回答", "missing_information": "评估未通过"}
+                 for q in questions]
+        return valid, {"type": "stop"}, [], blocked, "assessment_unavailable"
+    kept = [q for q in questions if q["id"] in {r["subquestion_id"] for r in valid}]
+    try:
+        parsed, action = _assessment({"subquestions": valid, "action": data.get("action")}, kept, seen_ids)
+    except WorkflowStop as exc:
+        if exc.reason == "foreign_or_unseen_evidence":
+            raise
+        return valid, {"type": "stop"}, kept, blocked, exc.reason
+    if blocked:
+        action = {"type": "stop"}  # global proposed action may target a blocked question
+    return valid, action, kept, blocked, None
 
 
 def _normalize_final_contract(
@@ -567,7 +604,7 @@ def _render_final(data: Any, seen: dict[str, dict], paper_mode: bool) -> tuple[s
         claims.append({"kind": kind, "heading": heading, "text": statement, "evidence_ids": ids})
     caveats = data.get("caveats", [])
     if caveats:
-        lines.extend(["", "### 论文未进一步说明"])
+        lines.extend(["", "### 当前证据边界与待核实内容"])
         lines.extend(f"- {item}" for item in caveats)
     if unresolved:
         lines.extend(["", "### 尚缺少核心证据"])
@@ -577,13 +614,77 @@ def _render_final(data: Any, seen: dict[str, dict], paper_mode: bool) -> tuple[s
     return "\n".join(lines), claims, unresolved
 
 
+def _prepare_final_contract(data, questions, seen, paper_mode, trace):
+    """Keep independently valid records; never claim source identity proves truth.
+
+    This is deterministic display recovery, not a model retry or JSON repair.
+    The original response remains in the model event for audit.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        raise WorkflowStop("invalid_final_answer")
+    if not data["items"]:
+        # A deliberate evidence-insufficient answer is not a malformed record.
+        return _normalize_final_contract(data, questions, seen, paper_mode)
+    accepted, decisions = [], []
+    for index, item in enumerate(data["items"][:64]):
+        parts = [item]
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            text = item["text"]
+            if 1000 < len(text) <= 20000:
+                parts = [dict(item, text=text[pos:pos + 1000])
+                         for pos in range(0, len(text), 1000)]
+                decisions.append({"index": index, "reason": "long_claim_split",
+                                  "parts": len(parts)})
+        try:
+            for part in parts:
+                _render_final({"items": [part]}, seen, paper_mode)
+            if len(accepted) + len(parts) > 64:
+                raise WorkflowStop("final_item_budget")
+        except (WorkflowStop, TypeError, ValueError) as exc:
+            decisions.append({"index": index,
+                              "reason": getattr(exc, "reason", "invalid_item"),
+                              "discarded": True})
+        else:
+            accepted.extend(parts)
+    if len(data["items"]) > 64:
+        decisions.append({"reason": "final_item_budget", "discarded": True,
+                          "count": len(data["items"]) - 64})
+    if not accepted:
+        # Do not turn a paper-fact record into background to bypass provenance.
+        reason = next((row["reason"] for row in decisions if row.get("discarded")),
+                      "no_valid_answer_items")
+        raise WorkflowStop(reason)
+    prepared = dict(data, items=accepted)
+    try:
+        normalized = _normalize_final_contract(prepared, questions, seen, paper_mode)
+        _render_final(normalized[0], seen, paper_mode)
+    except (WorkflowStop, TypeError, ValueError) as exc:
+        decisions.append({"reason": getattr(exc, "reason", "invalid_final_metadata"),
+                          "metadata_discarded": True})
+        # Invalid coverage must not be advertised as answered/supported.
+        normalized = ({"items": accepted, "unresolved": [], "caveats": []}, [], [], False)
+    if decisions:
+        report = {"retained_items": len(accepted), "decisions": decisions,
+                  "extra_model_calls": 0, "semantic_accuracy_proven": False}
+        trace["answer_degradation"] = report
+        trace["events"].append({"step": "answer_degradation", **report})
+    return normalized
+
+
 def _save_private_trace(trace: dict, directory: Path | None) -> None:
     if directory is None:
         return
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    target = directory / f"{trace['request_id']}.json"
-    target.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{trace['request_id']}.json"
+        target.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        # Logging failure must not erase an already generated paid answer.
+        # It is still an observability failure, not a successful persistence.
+        import logging
+        trace["trace_persistence"] = {"status": "failed", "error_type": type(exc).__name__}
+        logging.getLogger(__name__).error("Research trace persistence failed: %s", type(exc).__name__)
 
 
 def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any, *,
@@ -676,6 +777,7 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
             final = call("general", {
                 "question": question, "mode": mode, "answer_depth": answer_depth,
             }, {"concise": 900, "beginner": 1800, "advanced": 2400}[answer_depth])
+            final, _, _, _ = _prepare_final_contract(final, [], {}, False, trace)
             answer, claims, unresolved = _render_final(final, {}, False)
             stop_reason = "general_answer"
         else:
@@ -723,7 +825,16 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                                               "evidence": segments.copy()}, 800)
             event("model_proposal", raw=assessment_data)
             try:
-                assessments, action = _assessment(assessment_data, questions, seen_ids)
+                assessments, action, kept_questions, blocked, action_error = _isolated_assessment(
+                    assessment_data, questions, seen_ids)
+                if blocked or action_error:
+                    trace["assessment_degradation"] = {"blocked_subquestions": blocked,
+                        "action_error": action_error, "original_proposal": assessment_data,
+                        "effective_action": action, "semantic_accuracy_proven": False}
+                    event("assessment_degradation", **trace["assessment_degradation"])
+                # If every assessment is malformed, final writing may still use
+                # the already scoped evidence, explicitly without valid assessment.
+                questions = kept_questions or questions
             except WorkflowStop as exc:
                 event("gate", allowed=False, reason=exc.reason, remaining_actions=budget.max_actions - trace["actions"])
                 raise
@@ -790,13 +901,15 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                 stop_reason = "followup_executed" if newly_provided else "followup_empty"
             seen = {part["id"]: part for part in segments}
             final = call("final", {"question": question, "subquestions": questions,
+                                   "blocked_subquestions": (trace.get("assessment_degradation") or {}).get("blocked_subquestions", []),
+                                   "assessment_unavailable": (trace.get("assessment_degradation") or {}).get("action_error") == "assessment_unavailable",
                                    "conversation": conversation_history,
                                    "assessments": assessments, "evidence": segments.copy(),
                                    "stop_reason": stop_reason,
                                    "answer_depth": answer_depth},
                          RAG_PAPER_OUTPUT_LIMITS[answer_depth])
-            final, coverage, caveats, structured_coverage = _normalize_final_contract(
-                final, questions, seen, True
+            final, coverage, caveats, structured_coverage = _prepare_final_contract(
+                final, questions, seen, True, trace
             )
             answer, claims, unresolved = _render_final(final, seen, True)
             sources = _build_public_sources(claims, seen)
@@ -809,6 +922,16 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
             unresolved = [TRUNCATION_NOTICE]
             answer += "\n\n### 本次输出未完成\n- " + TRUNCATION_NOTICE
             status, stop_reason = "partial", "output_token_limit_partial"
+        elif trace.get("assessment_degradation"):
+            status, stop_reason = "partial", "assessment_validation_partial"
+            report = trace["assessment_degradation"]
+            answer += "\n\n### 评估降级说明\n- 部分评估未通过格式检查，未执行额外补查；已保留基于当前证据的回答。"
+            for row in report["blocked_subquestions"]:
+                qualifier = "未通过评估，未按已核验子问题输出" if not report["action_error"] == "assessment_unavailable" else "评估不可用，相关解释仅供有限参考"
+                answer += f"\n- {row['subquestion_id']}：{row['question']}；{qualifier}（{row['reason']}），可单独追问。"
+        elif trace.get("answer_degradation"):
+            status, stop_reason = "partial", "answer_validation_partial"
+            answer += "\n\n部分输出格式已调整或不合规内容已省略；保留内容通过来源身份校验，但仍需核查事实。"
         elif mode == "paper_deep" and unresolved:
             postcheck_reason = (
                 "final_unresolved_after_supported_stop"
@@ -827,6 +950,10 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
             stop_reason = "answer_with_caveats"
         else:
             status = "ok"
+        if trace.get("assessment_degradation") and "### 评估降级说明" not in answer:
+            answer += "\n\n### 评估降级说明\n- 评估格式未完全通过，未追加补查；部分问题尚待单独核实。"
+            for row in trace["assessment_degradation"]["blocked_subquestions"]:
+                answer += f"\n- {row['subquestion_id']}：{row['question']}（{row['reason']}），可单独追问。"
         event("finish", stop_reason=stop_reason, claims=claims, unresolved=unresolved,
               coverage=coverage, caveats=caveats)
     except WorkflowStop as exc:
@@ -843,7 +970,8 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
     quality_report = review_once(
         model, question, answer, segments, trace,
         enabled=enable_quality_review and mode == "paper_deep"
-        and not trace.get("output_recovery")
+        and not trace.get("output_recovery") and not trace.get("answer_degradation")
+        and not trace.get("assessment_degradation")
         and status in {"ok", "ok_with_limits", "partial", "insufficient"},
     )
     trace["cached_tokens"] = cache_total(trace)

@@ -486,7 +486,16 @@ def run_adaptive_research(
                      output_budget_exceeded=response.get("output_budget_exceeded"),
                      output_limit_reached=response.get("output_limit_reached"))
         if clock() - started > 120:
-            raise WorkflowStop("deadline")
+            if (stage in {"full_context", "structured_context"}
+                    and not response.get("output_budget_exceeded")
+                    and (response.get("data") is not None
+                         or response.get("parse_error") == "output_token_limit")):
+                # The paid final response has already arrived. Validate locally,
+                # keep its usable records, and do not start another model call.
+                trace["late_final_response"] = True
+                trace["events"].append({"step": "late_final_response", "extra_model_calls": 0})
+            else:
+                raise WorkflowStop("deadline")
         if response.get("parse_error") or response.get("data") is None:
             if stage in {"full_context", "structured_context"}:
                 from partial_output import recover_final
@@ -532,8 +541,9 @@ def run_adaptive_research(
         data = full_call("structured_context" if brief is not None else "full_context", payload,
                          FULL_PAPER_OUTPUT_LIMITS[answer_depth])
         seen = {item["id"]: item for item in evidence}
-        final, coverage, caveats, structured = _normalize_final_contract(
-            data, [{"id": "q1", "text": question}], seen, True
+        from deep_research import _prepare_final_contract
+        final, coverage, caveats, structured = _prepare_final_contract(
+            data, [{"id": "q1", "text": question}], seen, True, trace
         )
         answer, claims, unresolved = _render_final(final, seen, True)
         sources = _build_public_sources(claims, seen)
@@ -542,6 +552,12 @@ def run_adaptive_research(
             unresolved = [TRUNCATION_NOTICE]
             answer += "\n\n### 本次输出未完成\n- " + TRUNCATION_NOTICE
             status, stop_reason = "partial", "output_token_limit_partial"
+        elif trace.get("late_final_response"):
+            status, stop_reason = "partial", "deadline_answer_retained"
+            answer += "\n\n本次响应超过总时限；已保留通过结构与来源身份校验的内容，不再追加分析。"
+        elif trace.get("answer_degradation"):
+            status, stop_reason = "partial", "answer_validation_partial"
+            answer += "\n\n部分输出格式已调整或不合规内容已省略；保留内容通过来源身份校验，但仍需核查事实。"
         elif unresolved:
             status = "insufficient" if structured else "partial"
             stop_reason = "full_context_incomplete"
@@ -568,7 +584,8 @@ def run_adaptive_research(
     quality_report = review_once(
         model, question, answer, evidence, trace,
         enabled=enable_quality_review and explanation_pipeline != "structured"
-        and not trace.get("output_recovery")
+        and not trace.get("output_recovery") and not trace.get("answer_degradation")
+        and not trace.get("late_final_response")
         and status in {"ok", "ok_with_limits", "partial", "insufficient"},
     )
     trace["cached_tokens"] = cache_total(trace)

@@ -72,18 +72,21 @@ def complete_items(raw):
 
 
 def recover_final(response, seen, paper_mode=True):
-    from deep_research import _render_final, WorkflowStop
+    from deep_research import _prepare_final_contract, WorkflowStop
     if response.get("parse_error") != "output_token_limit" or response.get("output_budget_exceeded"):
         return None, None
     candidates = complete_items(response.get("raw"))
     accepted, rejected = [], []
     for index, item in enumerate(candidates):
         try:
-            _render_final({"items": [item]}, seen, paper_mode)
+            prepared, _, _, _ = _prepare_final_contract(
+                {"items": [item]}, [], seen, paper_mode, {"events": []})
+            if len(accepted) + len(prepared["items"]) > 64:
+                raise WorkflowStop("final_item_budget")
         except (WorkflowStop, TypeError, ValueError, RecursionError) as exc:
             rejected.append({"index": index, "reason": getattr(exc, "reason", "invalid_item")})
         else:
-            accepted.append(item)
+            accepted.extend(prepared["items"])
     report = {"reason": "output_token_limit", "complete_items": len(candidates),
               "retained_items": len(accepted), "rejected_items": rejected,
               "extra_model_calls": 0, "semantic_accuracy_proven": False}
