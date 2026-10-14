@@ -1,5 +1,21 @@
 # Research Assistant Agent
 
+## Current local demo (2026-10-14)
+
+The bounded single-agent reading workflow has been merged into `main`.
+Use `/research` for adaptive full-paper/RAG reading, local PDF import and follow-up questions;
+use `/admin/research` for private execution traces. The legacy `/chat` and root page remain compatibility paths.
+The V1 sections below describe that legacy path, not the complete current workflow.
+
+Local Docker startup and recreation persistence have been checked. Paper-answer quality still has known
+retrieval and reasoning limitations; this is not a public or production-ready release.
+Offline regression on the merged checkout: 212 tests run, 2 private-fixture tests skipped, no failures.
+The standalone local acceptance file is `compose.acceptance.yaml` (loopback port 8020).
+Credentials, paper databases and traces are local/ignored and are not migrated by Git merge.
+
+See [branch and runtime directory guide](docs/分支合并与运行目录说明-20261014.md)
+and [development retrospective](docs/开发复盘-给自己看.md).
+
 > V1.1 — a single-paper, evidence-grounded research reading assistant with evaluation, telemetry, and container delivery.
 
 Upload a PDF paper and receive a structured summary or follow-up answer whose paper facts are tied to retrieved source sections, PDF pages, and original excerpts. V1 is designed to make paper claims inspectable; it is not intended to replace reading a paper in full.
