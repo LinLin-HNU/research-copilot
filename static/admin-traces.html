@@ -75,6 +75,11 @@
     </label>
     <button id="load" type="button">加载运行记录</button>
   </section>
+  <div class="toolbar" style="margin-top:-10px;align-items:center">
+    <label style="display:flex;align-items:center;flex-direction:row"><input id="rememberToken" type="checkbox" style="width:auto">本标签页记住 Token（仅 sessionStorage，页面脚本可读取）</label>
+    <button id="clearToken" type="button">清除 Token</button>
+    <a href="/research" style="color:var(--brand)">返回论文助手</a>
+  </div>
   <div id="error" class="error" role="alert"></div>
   <section class="layout">
     <div class="panel">
@@ -213,5 +218,6 @@
     finally { loadButton.disabled = false; }
   });
 </script>
+<script src="/research-access.js?v=20261014"></script>
 </body>
 </html>
