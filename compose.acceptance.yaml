@@ -1,0 +1,23 @@
+# Standalone local acceptance. Do not combine with other Compose files.
+services:
+  research-copilot:
+    image: research-copilot-acceptance:local
+    build: .
+    ports:
+      - "127.0.0.1:8020:8000"
+    env_file:
+      - .env
+    environment:
+      RESEARCH_QUALITY_REVIEW: "0"
+    volumes:
+      # Experiment checkout only; never mount the frozen/main V1 resources.
+      - ./resources:/app/resources
+      # Persist adaptive/G1 traces and request-local runtime files, not old eval data.
+      - ./benchmark/experiments/private/docker_acceptance_runtime:/app/benchmark/experiments/private
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/research', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

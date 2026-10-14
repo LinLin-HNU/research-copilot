@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'experiment/**']
   pull_request:
     branches: [main]
 
@@ -12,8 +12,9 @@ jobs:
     # Unit tests mock external calls, but LangChain validates these values
     # while importing the application configuration.
     env:
-      DASHSCOPE_API_KEY: ci-test-key
-      DASHSCOPE_BASE_URL: https://example.invalid/v1
+      OPENAI_API_KEY: ci-test-key
+      OPENAI_BASE_URL: https://example.invalid/v1
+      MODEL_NAME: ci-test-model
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,5 +22,5 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
-      - run: python -m py_compile *.py benchmark/*.py
-      - run: python -m unittest discover -s tests -v
+      - run: python -m compileall -q . -x "(resources|private|\.venv|\.git)"
+      - run: python -B benchmark/experiments/run_offline_tests.py

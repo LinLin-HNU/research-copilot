@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>科研助手 · 运行追踪</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, "Microsoft YaHei", system-ui, sans-serif;
+      --bg: light-dark(#f5f7fb, #10141c);
+      --panel: light-dark(#ffffff, #191f2b);
+      --text: light-dark(#172033, #eef3ff);
+      --muted: light-dark(#667085, #a6b0c3);
+      --line: light-dark(#e4e8f0, #30394b);
+      --brand: light-dark(#3157d5, #8aa4ff);
+      --ok: light-dark(#087a55, #67d7ae);
+      --warn: light-dark(#a15c00, #ffc46b);
+      --bad: light-dark(#b42318, #ff8d86);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px 20px 56px; }
+    h1 { margin: 0; font-size: 26px; font-weight: 650; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    p { color: var(--muted); }
+    .toolbar, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+    .toolbar { display: flex; gap: 10px; align-items: end; padding: 16px; margin: 22px 0; }
+    label { display: grid; gap: 6px; flex: 1; color: var(--muted); font-size: 13px; }
+    input, button { font: inherit; border-radius: 9px; border: 1px solid var(--line); padding: 10px 12px; }
+    input { width: 100%; background: var(--bg); color: var(--text); }
+    button { background: var(--brand); color: light-dark(white, #10141c); border-color: transparent; font-weight: 600; }
+    button:disabled { opacity: .55; }
+    .layout { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(420px, 1.2fr); gap: 18px; }
+    .panel { padding: 18px; min-width: 0; }
+    .run-list { display: grid; gap: 10px; }
+    .run { width: 100%; text-align: left; color: var(--text); background: transparent; border-color: var(--line); }
+    .run:hover, .run.active { border-color: var(--brand); background: color-mix(in srgb, var(--brand) 8%, transparent); }
+    .run-top, .metrics { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .question { display: block; margin: 7px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meta, .metrics { color: var(--muted); font-size: 12px; }
+    .status { font-weight: 650; }
+    .status.ok { color: var(--ok); }
+    .status.partial, .status.stopped { color: var(--warn); }
+    .status.error { color: var(--bad); }
+    .empty { padding: 32px 10px; text-align: center; color: var(--muted); }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-bottom: 18px; }
+    .metric { border-top: 2px solid var(--line); padding-top: 8px; }
+    .metric strong { display: block; font-size: 18px; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .timeline { display: grid; gap: 0; }
+    .event { display: grid; grid-template-columns: 28px 1fr; gap: 10px; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--brand); margin: 5px auto 0; position: relative; }
+    .event:not(:last-child) .dot::after { content: ""; position: absolute; width: 1px; background: var(--line); top: 13px; bottom: -72px; left: 5px; }
+    .event-body { padding-bottom: 18px; min-width: 0; }
+    .event-title { font-weight: 650; }
+    .event-result { color: var(--muted); margin: 3px 0 7px; }
+    details { color: var(--muted); font-size: 12px; }
+    pre { overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-word; background: var(--bg); padding: 10px; border-radius: 8px; }
+    .error { color: var(--bad); min-height: 20px; }
+    @media (max-width: 820px) {
+      .layout { grid-template-columns: 1fr; }
+      .summary { grid-template-columns: repeat(2, 1fr); }
+      .toolbar { align-items: stretch; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>科研助手运行追踪</h1>
+  <p>仅管理员查看。普通用户回答不会显示 Token、耗时、内部动作或原始模型输出。</p>
+  <section class="toolbar">
+    <label>管理员令牌
+      <input id="token" type="password" autocomplete="off" placeholder="输入 DEEP_RESEARCH_API_TOKEN">
+    </label>
+    <button id="load" type="button">加载运行记录</button>
+  </section>
+  <div class="toolbar" style="margin-top:-10px;align-items:center">
+    <label style="display:flex;align-items:center;flex-direction:row"><input id="rememberToken" type="checkbox" style="width:auto">本标签页记住 Token（仅 sessionStorage，页面脚本可读取）</label>
+    <button id="clearToken" type="button">清除 Token</button>
+    <a href="/research" style="color:var(--brand)">返回论文助手</a>
+  </div>
+  <div id="error" class="error" role="alert"></div>
+  <section class="layout">
+    <div class="panel">
+      <h2>最近运行</h2>
+      <div id="runs" class="run-list"><div class="empty">输入令牌后加载</div></div>
+    </div>
+    <div class="panel">
+      <h2>执行时间线</h2>
+      <div id="detail"><div class="empty">选择一条运行记录</div></div>
+    </div>
+  </section>
+</main>
+<script>
+  const token = document.getElementById('token');
+  const loadButton = document.getElementById('load');
+  const runs = document.getElementById('runs');
+  const detail = document.getElementById('detail');
+  const error = document.getElementById('error');
+
+  const text = (value, fallback = '—') => value === null || value === undefined || value === '' ? fallback : String(value);
+  const metric = (label, value) => {
+    const box = document.createElement('div');
+    box.className = 'metric';
+    const strong = document.createElement('strong');
+    strong.textContent = text(value);
+    const span = document.createElement('span');
+    span.textContent = label;
+    box.append(strong, span);
+    return box;
+  };
+
+  async function api(path) {
+    const response = await fetch(path, { headers: { 'X-Research-Token': token.value } });
+    if (!response.ok) {
+      let message = `请求失败（${response.status}）`;
+      try { message = (await response.json()).detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    return response.json();
+  }
+
+  function renderDetail(data) {
+    detail.replaceChildren();
+    const summary = document.createElement('div');
+    summary.className = 'summary';
+    summary.append(
+      metric('运行模式', data.mode),
+      metric('策略 / 范围', `${text(data.decision.strategy)} / ${text(data.decision.question_scope)}`),
+      metric('建议全文复核', data.decision.deep_retry_recommended ? '是（需用户确认）' : '否'),
+      metric('模型 / 检索', `${text(data.usage.model_calls, 0)} / ${text(data.usage.retrieval_calls, 0)}`),
+      metric('总 Token', data.usage.total_tokens),
+      metric('缓存命中', data.usage.cached_tokens == null ? '未报告' : data.usage.cached_tokens),
+      metric('总耗时', data.timing.elapsed_ms == null ? null : `${data.timing.elapsed_ms} ms`),
+      metric('证据字符', data.evidence.chars),
+      metric('唯一证据', data.evidence.unique_ids),
+      metric('状态', data.status),
+      metric('停止原因', data.stop_reason)
+    );
+    const question = document.createElement('p');
+    question.textContent = `问题：${text(data.question)}`;
+    const timeline = document.createElement('div');
+    timeline.className = 'timeline';
+    for (const event of data.timeline) {
+      const row = document.createElement('div');
+      row.className = 'event';
+      const dot = document.createElement('div');
+      dot.className = 'dot';
+      const body = document.createElement('div');
+      body.className = 'event-body';
+      const title = document.createElement('div');
+      title.className = 'event-title';
+      title.textContent = `${event.index}. ${event.label}`;
+      const result = document.createElement('div');
+      result.className = 'event-result';
+      result.textContent = event.result;
+      const details = document.createElement('details');
+      const summaryLabel = document.createElement('summary');
+      summaryLabel.textContent = '查看原始事件';
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(event.detail, null, 2);
+      details.append(summaryLabel, pre);
+      body.append(title, result, details);
+      row.append(dot, body);
+      timeline.append(row);
+    }
+    detail.append(summary, question, timeline);
+  }
+
+  async function openRun(id, button) {
+    error.textContent = '';
+    document.querySelectorAll('.run').forEach(item => item.classList.remove('active'));
+    button.classList.add('active');
+    try { renderDetail(await api(`/admin/research/traces/${encodeURIComponent(id)}`)); }
+    catch (err) { error.textContent = err.message; }
+  }
+
+  function renderRuns(items) {
+    runs.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = '还没有自适应工作流运行记录';
+      runs.append(empty);
+      return;
+    }
+    for (const item of items) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'run';
+      const top = document.createElement('div');
+      top.className = 'run-top';
+      const status = document.createElement('span');
+      status.className = `status ${text(item.status, '')}`;
+      status.textContent = text(item.status);
+      const mode = document.createElement('span');
+      mode.className = 'meta';
+      mode.textContent = text(item.mode);
+      const question = document.createElement('span');
+      question.className = 'question';
+      question.textContent = text(item.question);
+      const metrics = document.createElement('span');
+      metrics.className = 'metrics';
+      metrics.textContent = `${text(item.usage.total_tokens, '?')} Token · ${text(item.timing.elapsed_ms, '?')} ms`;
+      top.append(status, mode);
+      button.append(top, question, metrics);
+      button.addEventListener('click', () => openRun(item.request_id, button));
+      runs.append(button);
+    }
+  }
+
+  loadButton.addEventListener('click', async () => {
+    error.textContent = '';
+    loadButton.disabled = true;
+    try { renderRuns((await api('/admin/research/traces')).items || []); }
+    catch (err) { error.textContent = err.message; }
+    finally { loadButton.disabled = false; }
+  });
+</script>
+<script src="/research-access.js?v=20261014"></script>
+</body>
+</html>

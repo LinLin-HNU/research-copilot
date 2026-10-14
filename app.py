@@ -1,24 +1,49 @@
 import json
+import logging
+import os
+import re
+import threading
 import uuid
+from pathlib import Path
 from time import perf_counter
+from urllib.parse import unquote
 
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
 from langchain.messages import HumanMessage, AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.messages import RemoveMessage
 from agent_setup import clear_thread_history, get_research_agent, RequestContext
 from database import (
     init_db, create_session, list_sessions, delete_session, update_session_title,
-    record_request_metric,
+    list_adaptive_turns, record_adaptive_turn, record_request_metric, session_exists,
 )
-from schemas import ChatRequest, HistoryItem, HistoryResponse, DeleteResponse
+from schemas import (
+    AdaptiveResearchRequest,
+    ChatRequest,
+    DeepResearchRequest,
+    DeleteResponse,
+    HistoryItem,
+    HistoryResponse,
+)
+from deep_research import ChromaPaperRetriever, run_deep_research
+from adaptive_research import AdaptivePolicy, public_research_result, run_adaptive_research
+from deep_research_runtime import (
+    AliyunResearchModel,
+    ResearchAccessError,
+    load_research_guard,
+)
 from oss_sts import get_oss_token
 from paper_parser import extract_text_from_bytes, detect_sections, chunk_sections, guess_title
 from rag_store import get_rag
 from query_router import build_route
+from trace_admin import TraceRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -37,11 +62,106 @@ app = FastAPI(
 )
 
 
+_research_guard = None
+_research_guard_lock = threading.Lock()
+MAX_LOCAL_PDF_BYTES = 25 * 1024 * 1024
+ADAPTIVE_TRACE_DIR = (
+    Path(__file__).parent
+    / "benchmark"
+    / "experiments"
+    / "private"
+    / "workflow_adaptive_live"
+)
+
+
+def get_research_guard():
+    """Load local experiment limits once; changing .env requires an app restart."""
+    global _research_guard
+    if _research_guard is None:
+        with _research_guard_lock:
+            if _research_guard is None:
+                _research_guard = load_research_guard()
+    return _research_guard
+
+
 async def download_from_oss(url: str) -> bytes:
     async with httpx.AsyncClient() as client:
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.content
+
+
+@app.post("/research/import")
+async def import_research_pdf(
+    request: Request,
+    x_research_token: str | None = Header(default=None),
+    x_confirm_embedding: str | None = Header(default=None),
+    x_paper_filename: str | None = Header(default=None),
+):
+    """Import a PDF directly from the local client, without generating an answer."""
+    try:
+        get_research_guard().authenticate(x_research_token)
+    except ResearchAccessError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    if x_confirm_embedding != "true":
+        raise HTTPException(status_code=400, detail="请先确认论文分块将发送到嵌入服务")
+    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/pdf":
+        raise HTTPException(status_code=415, detail="仅支持 PDF 文件")
+    declared_size = request.headers.get("content-length")
+    if declared_size and (not declared_size.isdigit() or int(declared_size) > MAX_LOCAL_PDF_BYTES):
+        raise HTTPException(status_code=413, detail="PDF 不得超过 25 MB")
+    data = bytearray()
+    async for part in request.stream():
+        data.extend(part)
+        if len(data) > MAX_LOCAL_PDF_BYTES:
+            raise HTTPException(status_code=413, detail="PDF 不得超过 25 MB")
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="文件内容不是有效的 PDF")
+
+    def parse_and_index():
+        try:
+            full_text, line_pages = extract_text_from_bytes(bytes(data))
+            sections, section_pages = detect_sections(full_text, line_pages)
+            chunks = chunk_sections(sections, section_pages)
+        except Exception as exc:
+            raise ValueError("pdf_parse_failed") from exc
+        if not chunks:
+            raise ValueError("no_readable_paper_text")
+        supplied_name = Path(unquote(x_paper_filename or "").replace("\\", "/")).name
+        if supplied_name.lower().endswith(".pdf"):
+            stem = re.sub(r"^\d{4}[_ -]+", "", supplied_name[:-4])
+            title = re.sub(r"\s+", " ", stem.replace("_", " ")).strip()[:100]
+        else:
+            title = ""
+        title = title or guess_title(full_text)
+        thread_id = str(uuid.uuid4())
+        rag = get_rag()
+        try:
+            # This calls the configured embedding provider; no generation call is made.
+            rag.store(thread_id, chunks, title)
+            create_session(thread_id, title)
+        except Exception:
+            try:
+                rag.delete_collection(thread_id)
+            except Exception:
+                logger.exception("Could not clean up failed import %s", thread_id)
+            raise
+        return {
+            "thread_id": thread_id,
+            "title": title,
+            "page_count": max(line_pages, default=0),
+            "chunk_count": len(chunks),
+        }
+
+    try:
+        return await run_in_threadpool(parse_and_index)
+    except ValueError as exc:
+        if str(exc) in {"pdf_parse_failed", "no_readable_paper_text"}:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise
+    except Exception as exc:
+        logger.exception("Local research PDF import failed")
+        raise HTTPException(status_code=502, detail="论文索引失败，请检查嵌入服务和本地日志") from exc
 
 
 SUMMARY_QUERIES = [
@@ -471,6 +591,214 @@ async def chat(request: ChatRequest, fastapi_req: Request):
                 pass
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/research/deep")
+async def deep_research_endpoint(
+    payload: DeepResearchRequest,
+    x_research_token: str | None = Header(default=None),
+):
+    """Run one explicitly confirmed, local-only, bounded research experiment."""
+    try:
+        guard = get_research_guard()
+        # Authenticate before checking thread existence to avoid exposing local IDs.
+        guard.authenticate(x_research_token)
+        if payload.mode == "paper_deep" and (
+            not payload.thread_id or not session_exists(payload.thread_id)
+        ):
+            raise HTTPException(status_code=404, detail="未找到对应论文会话")
+        reservation_id = guard.begin(
+            x_research_token,
+            payload.confirm_external_processing,
+        )
+    except ResearchAccessError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    result = None
+    try:
+        def execute():
+            retriever = (
+                ChromaPaperRetriever(get_rag())
+                if payload.mode == "paper_deep"
+                else None
+            )
+            return run_deep_research(
+                payload.question,
+                payload.thread_id or "",
+                retriever,
+                AliyunResearchModel(),
+                mode=payload.mode,
+                trace_dir=Path(__file__).parent
+                / "benchmark"
+                / "experiments"
+                / "private"
+                / "workflow_g1_live",
+            )
+
+        result = await run_in_threadpool(execute)
+    except Exception as exc:
+        # No result means token usage cannot be accounted for reliably. Release the
+        # reservation and expose only the error type, never credentials or prompts.
+        guard.cancel(reservation_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"深度研究运行失败：{type(exc).__name__}",
+        ) from exc
+
+    input_tokens = result.get("input_tokens")
+    output_tokens = result.get("output_tokens")
+    actual_tokens = (
+        input_tokens + output_tokens
+        if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+        else None
+    )
+    guard.finish(reservation_id, actual_tokens)
+    result["local_limits"] = guard.snapshot()
+    result["external_processing"] = {
+        "provider": "configured Aliyun-compatible endpoint",
+        "confirmed": True,
+        "payload_chars": result.get("external_payload_chars", 0),
+    }
+    return result
+
+
+@app.post("/research/adaptive")
+async def adaptive_research_endpoint(
+    payload: AdaptiveResearchRequest,
+    x_research_token: str | None = Header(default=None),
+):
+    """Run auto-selected general, full-paper or bounded-RAG research."""
+    try:
+        guard = get_research_guard()
+        guard.authenticate(x_research_token)
+        if payload.thread_id and not session_exists(payload.thread_id):
+            raise HTTPException(status_code=404, detail="未找到对应论文会话")
+        reservation_id = guard.begin(
+            x_research_token,
+            payload.confirm_external_processing,
+        )
+    except ResearchAccessError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    result = None
+    try:
+        def execute_adaptive():
+            rag = get_rag() if payload.thread_id else None
+            rows = rag.list_chunks(payload.thread_id) if rag is not None else None
+            retriever = ChromaPaperRetriever(rag) if rag is not None else None
+            conversation = (
+                list_adaptive_turns(payload.thread_id, limit=4)
+                if payload.thread_id and payload.history_mode == "continue" else []
+            )
+            try:
+                full_context_chars = int(
+                    os.getenv("ADAPTIVE_FULL_CONTEXT_MAX_CHARS", "100000")
+                )
+            except ValueError as exc:
+                raise RuntimeError("Invalid ADAPTIVE_FULL_CONTEXT_MAX_CHARS") from exc
+            return run_adaptive_research(
+                payload.question,
+                payload.thread_id,
+                rows,
+                retriever,
+                AliyunResearchModel(),
+                policy=AdaptivePolicy(full_context_max_chars=full_context_chars),
+                strategy=payload.strategy,
+                answer_depth=payload.answer_depth,
+                conversation_history=conversation,
+                history_mode=payload.history_mode,
+                explanation_pipeline=payload.explanation_pipeline,
+                enable_quality_review=(payload.enable_quality_review if payload.enable_quality_review is not None
+                                       else os.getenv("RESEARCH_QUALITY_REVIEW", "1").lower() in {"1", "true", "yes"}),
+                trace_dir=ADAPTIVE_TRACE_DIR,
+            )
+
+        result = await run_in_threadpool(execute_adaptive)
+    except ValueError as exc:
+        guard.cancel(reservation_id)
+        raise HTTPException(status_code=400, detail=f"研究配置不适用：{exc}") from exc
+    except Exception as exc:
+        guard.cancel(reservation_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"自适应研究运行失败：{type(exc).__name__}",
+        ) from exc
+
+    input_tokens = result.get("input_tokens")
+    output_tokens = result.get("output_tokens")
+    actual_tokens = (
+        input_tokens + output_tokens
+        if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+        else None
+    )
+    guard.finish(reservation_id, actual_tokens)
+    if payload.thread_id and result.get("status") in {
+        "ok", "ok_with_limits", "insufficient", "partial"
+    }:
+        try:
+            record_adaptive_turn({
+                "request_id": result["request_id"],
+                "thread_id": payload.thread_id,
+                "question": payload.question,
+                "answer": result.get("answer") or "",
+                "strategy": payload.strategy,
+                "answer_depth": payload.answer_depth,
+                "mode": result.get("mode") or "unknown",
+                "status": result["status"],
+            })
+        except Exception:
+            # A paid answer should still reach the user if optional conversation
+            # persistence fails. The administrator can diagnose the exception.
+            logger.exception(
+                "Failed to persist adaptive conversation turn for request %s",
+                result.get("request_id"),
+            )
+    # Operational metrics remain in the private trace and are intentionally
+    # not returned to the end-user response.
+    return public_research_result(result)
+
+
+def _authenticate_trace_admin(token: str | None) -> None:
+    try:
+        get_research_guard().authenticate(token)
+    except ResearchAccessError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.get("/admin/research")
+async def research_trace_page():
+    """Serve the shell only; trace data still requires the admin header token."""
+    return FileResponse(Path(__file__).parent / "static" / "admin-traces.html")
+
+
+@app.get("/research")
+async def adaptive_research_page():
+    """Local pilot UI; the access token stays in page memory only."""
+    return FileResponse(Path(__file__).parent / "static" / "research.html")
+
+
+@app.get("/admin/research/traces")
+async def list_research_traces(
+    limit: int = 50,
+    x_research_token: str | None = Header(default=None),
+):
+    _authenticate_trace_admin(x_research_token)
+    return {"items": TraceRepository(ADAPTIVE_TRACE_DIR).list(limit=max(1, min(limit, 200)))}
+
+
+@app.get("/admin/research/traces/{request_id}")
+async def get_research_trace(
+    request_id: str,
+    x_research_token: str | None = Header(default=None),
+):
+    _authenticate_trace_admin(x_research_token)
+    repository = TraceRepository(ADAPTIVE_TRACE_DIR)
+    try:
+        return repository.get(request_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="未找到该运行记录") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="运行记录编号无效") from exc
 
 
 @app.get("/history", response_model=HistoryResponse)
