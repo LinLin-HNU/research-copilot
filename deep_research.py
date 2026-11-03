@@ -1,7 +1,9 @@
-"""Bounded, request-local single-paper research workflow.
+"""
+RAG工作流具体怎样组织
+有界、请求本地单篇研究流程。
 
-Semantic evidence sufficiency is a model proposal. This module validates only
-the structure, provenance and cost of proposed actions and citations.
+语义证据充分性是一个示范提案。该模块仅验证
+拟议行动和引用的结构、来源及成本。
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ EVALUATION_SECTIONS = {"evaluation", "evaluation scores", "experiment", "experim
 TAXONOMY_QUERY_MARKERS = {"classification", "classify", "taxonomy", "categorization", "分类", "类目"}
 
 
+#预算类：定义预算如模型调用次数、动作次数、证据数和时间限制等
 @dataclass(frozen=True)
 class ResearchBudget:
     max_actions: int = 2
@@ -64,6 +67,7 @@ class ResearchBudget:
             raise ValueError("Timeouts must be positive")
 
 
+#工作流听停止类：携带明确停止原因的异常
 class WorkflowStop(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -86,17 +90,18 @@ def _evidence_text(segments: list[dict]) -> str:
     return "\n\n".join(_evidence_label(segment) for segment in segments)
 
 
+#证据准备：从一个原始块中取出一段可提供给模型的文本，保留来源位置   我的理解：其他方法检索匹配段落，定位到后调用这个方法去提取段落文本并带这丰富的元数据进行返回
 def _segment(row: dict, *, start: int, max_chars: int) -> dict | None:
     source = row.get("content")
     if not isinstance(source, str) or not source.strip() or start >= len(source):
         return None
-    chunk_id = _text(row.get("id"), limit=200, field="chunk_id")
-    section = str(row.get("section") or "unknown")[:80]
-    if section.strip().lower() in SKIP_SECTIONS:
+    chunk_id = _text(row.get("id"), limit=200, field="chunk_id")    #清洗chunk_id，看类型对吗，是否为空，是否过长大于200字符
+    section = str(row.get("section") or "unknown")[:80] #获取到section名字
+    if section.strip().lower() in SKIP_SECTIONS:    #如果是章节是附录呀、参考文献呀，就返回None，里面的内容意义不大
         return None
     page_start = row.get("page_start") or 0
     page_end = row.get("page_end") or page_start
-    if not isinstance(page_start, int) or not isinstance(page_end, int):
+    if not isinstance(page_start, int) or not isinstance(page_end, int):    #如果页码不是int，就抛异常
         raise WorkflowStop("invalid_page_metadata")
     shown = source[start:start + max_chars]
     return {"id": chunk_id, "section": section, "page_start": page_start,
@@ -106,12 +111,13 @@ def _segment(row: dict, *, start: int, max_chars: int) -> dict | None:
             "text": shown, "sha256": hashlib.sha256(shown.encode("utf-8")).hexdigest()}
 
 
+#证据准备：按块数和字符预算，把候选整理成实际证据   我的理解：选择文本后，chunk很大，需要调用本方法去整理成能给大模型的证据
 def _pack(rows: list[dict], segments: list[dict], *, limit: int, budget: ResearchBudget,
           start: int | None = None) -> list[dict]:
     added: list[dict] = []
-    ids = {segment["id"] for segment in segments}
-    spans = {(segment["id"], segment["start"], segment["end"]) for segment in segments}
-    fingerprints = {segment["sha256"] for segment in segments}
+    ids = {segment["id"] for segment in segments}   #统计提供片段的ID
+    spans = {(segment["id"], segment["start"], segment["end"]) for segment in segments} #统计块ID与字符起止范围q
+    fingerprints = {segment["sha256"] for segment in segments}  #统计指纹
     for row in rows:
         if len(ids) >= budget.max_unique_chunks and row.get("id") not in ids:   #预算检查和排除异常
             continue
@@ -132,6 +138,7 @@ def _pack(rows: list[dict], segments: list[dict], *, limit: int, budget: Researc
     return added
 
 
+
 def _lexical_tokens(text: str) -> list[str]:
     return [
         token.lower()
@@ -140,6 +147,7 @@ def _lexical_tokens(text: str) -> list[str]:
     ]
 
 
+#证据准备：选择一个更靠近查询词的文本窗口
 def _query_window_start(content: str, query: str, window: int = 600) -> int:
     """Choose a query-focused excerpt without using evaluation labels or answer keys."""
     tokens = set(_lexical_tokens(query))
@@ -161,6 +169,7 @@ def _query_window_start(content: str, query: str, window: int = 600) -> int:
     return max(candidates, key=score)
 
 
+#证据准备：根据 查询词 对论文块做 BM25式词项打分，并结合一些章节、标题规则   我的理解：就是被调用去做问题词句和论文内容的匹配
 def _lexical_rank(query: str, rows: list[dict], exclude_ids: set[str]) -> list[dict]:
     """Lightweight BM25 complement for exact paper entities and mechanism names."""
     ordered_query_terms = _lexical_tokens(query)
@@ -281,6 +290,7 @@ def _lexical_rank(query: str, rows: list[dict], exclude_ids: set[str]) -> list[d
     return [row for _domain, _matches, _score, _position, row in scored]
 
 
+#检查模型返回的证据：检查、整理模型返回的子问题规划
 def _plan(data: Any) -> list[dict]:
     if not isinstance(data, dict) or not isinstance(data.get("subquestions"), list):
         raise WorkflowStop("invalid_plan")
@@ -299,6 +309,7 @@ def _plan(data: Any) -> list[dict]:
     return parsed
 
 
+#证据准备：合并多个子问题的检索结果，兼顾覆盖和排名
 def _fuse_subquery_results(results: list[tuple[str, list[dict]]], *, k: int) -> list[dict]:
     """Fuse independently ranked subquery results while preserving coverage.
 
@@ -364,6 +375,7 @@ def _fuse_subquery_results(results: list[tuple[str, list[dict]]], *, k: int) -> 
     return fused
 
 
+#检查模型返回的数据：检查证据评估、引用ID和动作建议是否符合协议
 def _assessment(data: Any, questions: list[dict], seen_ids: set[str]) -> tuple[list[dict], dict]:
     if not isinstance(data, dict) or not isinstance(data.get("subquestions"), list):
         raise WorkflowStop("invalid_assessment")
@@ -421,6 +433,7 @@ def _assessment(data: Any, questions: list[dict], seen_ids: set[str]) -> tuple[l
     return parsed, action
 
 
+#检查模型返回的数据：隔离不合规的子问题，尽量保留其他有效评估
 def _isolated_assessment(data, questions, seen_ids):
     """Isolate protocol errors; provenance violations remain hard failures."""
     if not isinstance(data, dict) or not isinstance(data.get("subquestions"), list):
@@ -463,6 +476,7 @@ def _isolated_assessment(data, questions, seen_ids):
     if blocked:
         action = {"type": "stop"}  # global proposed action may target a blocked question
     return valid, action, kept, blocked, None
+
 
 
 def _normalize_final_contract(
@@ -538,6 +552,7 @@ def _citation_label(source: dict) -> str:
     return page
 
 
+#整理可展开的出处
 def _build_public_sources(claims: list[dict], seen: dict[str, dict]) -> list[dict]:
     sources: list[dict] = []
     observed: set[tuple[str, int, int]] = set()
@@ -562,6 +577,7 @@ def _build_public_sources(claims: list[dict], seen: dict[str, dict]) -> list[dic
     return sources
 
 
+#结果与检索工具：把结构化回答转换成用户能阅读的文字
 def _render_final(data: Any, seen: dict[str, dict], paper_mode: bool) -> tuple[str, list[dict], list[str]]:
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise WorkflowStop("invalid_final_answer")
@@ -614,6 +630,7 @@ def _render_final(data: Any, seen: dict[str, dict], paper_mode: bool) -> tuple[s
     return "\n".join(lines), claims, unresolved
 
 
+#检查模型返回的数据：检查和整理最终回答，处理部分不合规内容
 def _prepare_final_contract(data, questions, seen, paper_mode, trace):
     """Keep independently valid records; never claim source identity proves truth.
 
@@ -671,6 +688,7 @@ def _prepare_final_contract(data, questions, seen, paper_mode, trace):
     return normalized
 
 
+#结果与检索工具：保存本次执行记录未私有trace
 def _save_private_trace(trace: dict, directory: Path | None) -> None:
     if directory is None:
         return
@@ -687,6 +705,7 @@ def _save_private_trace(trace: dict, directory: Path | None) -> None:
         logging.getLogger(__name__).error("Research trace persistence failed: %s", type(exc).__name__)
 
 
+#主方法：组织规划、首次检索、评估、可选补差、最终写作和trace
 def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any, *,
                       mode: str = "paper_deep", budget: ResearchBudget | None = None,
                       answer_depth: str = "beginner",
@@ -694,7 +713,7 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                       enable_quality_review: bool = False,
                       trace_dir: Path | None = None, clock=time.monotonic) -> dict:
     """Run one bounded request; retriever/model are injected for offline tests."""
-    budget = budget or ResearchBudget()
+    budget = budget or ResearchBudget() #默认RAG预算
     conversation_history = list(conversation_history or [])[-4:]
     if mode not in {"paper_deep", "general"}:
         raise ValueError("Unsupported mode")
@@ -704,8 +723,8 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
     if mode == "paper_deep":
         _text(thread_id, limit=200, field="thread_id")
     started = clock()
-    deadline = started + budget.deadline_seconds
-    request_id = str(uuid.uuid4())
+    deadline = started + budget.deadline_seconds    #整次请求的截至时间
+    request_id = str(uuid.uuid4())  #新的request_id
     trace: dict[str, Any] = {
         "request_id": request_id, "thread_id": thread_id if mode == "paper_deep" else None,
         "mode": mode, "question": question, "budget": asdict(budget),
@@ -731,6 +750,7 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
     def event(name: str, **data: Any) -> None:
         trace["events"].append({"step": name, **data})
 
+    #真正的模型调用
     def call(stage: str, payload: dict, output_limit: int) -> Any:
         remaining_seconds = remaining()
         if trace["model_calls"] >= budget.max_model_calls:
@@ -781,11 +801,15 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
             answer, claims, unresolved = _render_final(final, {}, False)
             stop_reason = "general_answer"
         else:
+            #规划 生成子问题
+            """为什么要规划拆解子问题？
+                因为一句话里可能有多个目标。拆开查找，可以减少其中一个目标主导全部候选、另一个目标找不到材料的问题。但缺点是模型规划也有拆偏的可能，所以
+                它不是天然更好"""
             plan_data = call("plan", {
                 "conversation": conversation_history,
                 "question": question,
             }, 400)
-            questions = _plan(plan_data)
+            questions = _plan(plan_data)    #整理模型返回的JSON数据为子问题文本
             event("plan", subquestions=questions,
                   initial_queries=[{"subquestion_id": item["id"], "query": item["query"]}
                                    for item in questions])
@@ -793,15 +817,16 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
             trace["actions"] += 1
             per_query_results: list[tuple[str, list[dict]]] = []
             query_trace: list[dict] = []
+            #程序首次检索
             for item in questions:
                 trace["retrieval_calls"] += 1
-                found_for_query = retriever.search(
+                found_for_query = retriever.search( #程序操作检索对象进行检索
                     thread_id, item["query"], k=budget.max_unique_chunks,
                     exclude_ids=set(), timeout_seconds=remaining())
                 remaining()
                 if not isinstance(found_for_query, list):
                     raise WorkflowStop("invalid_retrieval_result")
-                per_query_results.append((item["id"], found_for_query))
+                per_query_results.append((item["id"], found_for_query)) #存放首次检索结果
                 query_trace.append({
                     "subquestion_id": item["id"],
                     "query": item["query"],
@@ -811,8 +836,10 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                         for row in found_for_query
                     },
                 })
-            found = _fuse_subquery_results(per_query_results, k=budget.max_unique_chunks)
-            segments.extend(_pack(found, segments, limit=budget.first_evidence_chars, budget=budget))
+            found = _fuse_subquery_results(per_query_results, k=budget.max_unique_chunks)   #结果融合：合并候选、去重，并兼顾不同子问题的覆盖
+            segments.extend(_pack(found, segments, limit=budget.first_evidence_chars, budget=budget))   #证据打包：按片段、唯一块数和总字符预算，形成实际提供内容
+            """这里有一个重要区别：检索找到了某块≠模型已经看见整块，它可能在融合时落选，也可能在打包时没有被保留，或者只提供了其中一个窗口
+                因此trace要记录候选和实际证据，以便定位损失"""
             event("retrieval", action="multi_search", queries=query_trace,
                   retrieval_calls=len(per_query_results), candidate_ids=[r.get("id") for r in found],
                   candidate_sources={r.get("id"): r.get("_retrieval_source", "unknown") for r in found},
@@ -821,11 +848,12 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                   candidate_starts={r.get("id"): r.get("_start", 0) for r in found},
                   provided_segments=segments.copy(), evidence_chars=len(_evidence_text(segments)))
             seen_ids = {part["id"] for part in segments}
+            #第二轮模型调用：评估证据，提出动作  这次模型才真正阅读已提供的证据
             assessment_data = call("assess", {"question": question, "subquestions": questions,
                                               "evidence": segments.copy()}, 800)
             event("model_proposal", raw=assessment_data)
             try:
-                assessments, action, kept_questions, blocked, action_error = _isolated_assessment(
+                assessments, action, kept_questions, blocked, action_error = _isolated_assessment(  #检查第二轮输出的assessment_data是否符合协议，并尽量隔离坏的子问题
                     assessment_data, questions, seen_ids)
                 if blocked or action_error:
                     trace["assessment_degradation"] = {"blocked_subquestions": blocked,
@@ -838,24 +866,27 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
             except WorkflowStop as exc:
                 event("gate", allowed=False, reason=exc.reason, remaining_actions=budget.max_actions - trace["actions"])
                 raise
+            #分岔口 判断模型输出是stop、search或expend  以下执行expend
             if action["type"] == "expand" and action["direction"] == "continue":
-                target_segments = [part for part in segments if part["id"] == action["target_id"]]
-                remaining_chars = max(
+                target_segments = [part for part in segments if part["id"] == action["target_id"]]  #找出当前正在扩展的那个文档块
+                remaining_chars = max(  #计算当前带扩展块剩余未读字符
                     (part.get("source_chars", part["end"]) - part["end"] for part in target_segments),
                     default=0,
                 )
+                #判断当前带扩展文档剩余还有多少字符（如果当前带扩展块剩余维度字符过少，就不再继续读了）
                 if remaining_chars < min(200, budget.max_chunk_chars // 3):
-                    question_text = {item["id"]: item["text"] for item in questions}
-                    gap_query = " ".join(
+                    question_text = {item["id"]: item["text"] for item in questions}    #整理子问题
+                    gap_query = " ".join(   #遍历系统对搜索结果的评估记录，找到信息缺失的评估项，然后和子问题拼接
                         f"{question_text[row['subquestion_id']]} {row['missing_information']}"
                         for row in assessments if row["missing_information"]
                     )[:240]
-                    action = {
+                    action = {  #更改行为，原先行为是expend，现在更改为search，并表明gap_query:子问题+缺失评估项，供下游去执行检索
                         "type": "search",
                         "query": gap_query,
                         "_guard_override": "low_yield_expand",
                     }
             event("assessment", subquestions=assessments, action=action)
+            #如果模型输出stop，则停止
             if action["type"] == "stop":
                 stop_reason = "model_stop"
                 event("gate", allowed=True, reason="model_stop", remaining_actions=budget.max_actions - trace["actions"])
@@ -869,30 +900,39 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                     event("gate", allowed=False, reason=override_reason,
                           remaining_actions=budget.max_actions - trace["actions"])
                 event("gate", allowed=True,
-                      reason="guard_fallback_search" if override_reason else "within_budget",
+                      reason="guard_fallback_search" if override_reason else "within_budget",   #这里额外记录，看search是被更改的还是模型原本就判断search
                       remaining_actions=budget.max_actions - trace["actions"] - 1)
                 trace["actions"] += 1
+                #模型输入search，这里有两种可能，一种是模型最初就是输出search，另一种是模型输出expend但收益低而被程序改为search
                 if action["type"] == "search":
                     trace["retrieval_calls"] += 1
+                    #调用检索器
                     found = retriever.search(thread_id, action["query"], k=budget.max_unique_chunks,
                                              exclude_ids=seen_ids, timeout_seconds=remaining())
                     remaining()
+                    #校验结果
                     if not isinstance(found, list):
                         raise WorkflowStop("invalid_retrieval_result")
+                    #装箱与去重
                     newly_provided = _pack(found, segments, limit=budget.max_evidence_chars, budget=budget)
                     segments.extend(newly_provided)
+                    #记录日志
                     event("followup", action=action, candidate_ids=[r.get("id") for r in found],
                           candidate_sources={r.get("id"): r.get("_retrieval_source", "unknown") for r in found},
                           candidate_starts={r.get("id"): r.get("_start", 0) for r in found},
                           provided_segments=newly_provided, evidence_chars=len(_evidence_text(segments)))
+                #执行扩展
                 else:
+                    #调用检索对象的扩展函数（实际去获取检索到的内容）——粗捞，大致捞取原内容附近的上下文
                     found = retriever.expand(thread_id, action["target_id"], action["direction"],
                                              seen_segments=segments.copy(), timeout_seconds=remaining())
                     remaining()
                     if not isinstance(found, list):
                         raise WorkflowStop("invalid_retrieval_result")
+                    #记录检索起始位置，防止重复内容——定位，找出之前读到了哪里，确定新内容起点
                     start = max((p["end"] for p in segments if p["id"] == action["target_id"]), default=0) \
                         if action["direction"] == "continue" else 0
+                    #精减——根据start剔除重叠部分，并根据预算裁剪得出最终长度
                     newly_provided = _pack(found, segments, limit=budget.max_evidence_chars,
                                            budget=budget, start=start)
                     segments.extend(newly_provided)
@@ -900,6 +940,7 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                           provided_segments=newly_provided, evidence_chars=len(_evidence_text(segments)))
                 stop_reason = "followup_executed" if newly_provided else "followup_empty"
             seen = {part["id"]: part for part in segments}
+            #第三轮模型调用：最终写作
             final = call("final", {"question": question, "subquestions": questions,
                                    "blocked_subquestions": (trace.get("assessment_degradation") or {}).get("blocked_subquestions", []),
                                    "assessment_unavailable": (trace.get("assessment_degradation") or {}).get("action_error") == "assessment_unavailable",
@@ -908,11 +949,11 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                                    "stop_reason": stop_reason,
                                    "answer_depth": answer_depth},
                          RAG_PAPER_OUTPUT_LIMITS[answer_depth])
-            final, coverage, caveats, structured_coverage = _prepare_final_contract(
+            final, coverage, caveats, structured_coverage = _prepare_final_contract(    #检查、整理回答结构和来源身份
                 final, questions, seen, True, trace
             )
-            answer, claims, unresolved = _render_final(final, seen, True)
-            sources = _build_public_sources(claims, seen)
+            answer, claims, unresolved = _render_final(final, seen, True)   #转换成用户能阅读的正文
+            sources = _build_public_sources(claims, seen)   #整理可展开的出处
         # The assessor can silently say "supported" and stop, while the final
         # writer later admits that evidence is missing.  At that point the
         # three-call budget is exhausted, so fail visibly instead of reporting
@@ -967,6 +1008,7 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
         claims, unresolved, coverage, caveats, sources = [], [stop_reason], [], [], []
         event("finish", stop_reason=stop_reason, error_type=type(exc).__name__)
     from quality_review import cache_total, review_once
+    #辅助审阅：从证据中再找一遍是否有值得怀疑的地方
     quality_report = review_once(
         model, question, answer, segments, trace,
         enabled=enable_quality_review and mode == "paper_deep"
@@ -1001,6 +1043,8 @@ def run_deep_research(question: str, thread_id: str, retriever: Any, model: Any,
                       for e in trace["events"]]}
 
 
+#结果与检索工具：进行论文检索和展开，但带有约束（论文范围约束）  这是一个类
+#本类是在rag_store.py的基础上，组织新版搜索、词项补充和展开
 class ChromaPaperRetriever:
     """Restrict all retrieval and expansion to the server-selected thread."""
 
@@ -1026,6 +1070,7 @@ class ChromaPaperRetriever:
             )
         return self._corpus_cache[thread_id]
 
+    #搜索方法，如词项和语义结果，召回候选快
     def search(self, thread_id: str, query: str, *, k: int, exclude_ids: set[str],
                timeout_seconds: float) -> list[dict]:
         semantic = self._guard_rows(thread_id, self.rag.search(
@@ -1049,6 +1094,7 @@ class ChromaPaperRetriever:
                 break
         return selected
 
+    #扩展方法，扩展读当前块或相邻块
     def expand(self, thread_id: str, target_id: str, direction: str, *,
                seen_segments: list[dict], timeout_seconds: float) -> list[dict]:
         del timeout_seconds  # Local Chroma get; deadline checked around the call.
