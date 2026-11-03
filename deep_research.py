@@ -113,8 +113,8 @@ def _pack(rows: list[dict], segments: list[dict], *, limit: int, budget: Researc
     spans = {(segment["id"], segment["start"], segment["end"]) for segment in segments}
     fingerprints = {segment["sha256"] for segment in segments}
     for row in rows:
-        if len(ids) >= budget.max_unique_chunks and row.get("id") not in ids:
-            break
+        if len(ids) >= budget.max_unique_chunks and row.get("id") not in ids:   #预算检查和排除异常
+            continue
         row_start = row.get("_start", 0) if start is None else start
         if not isinstance(row_start, int) or row_start < 0:
             raise WorkflowStop("invalid_retrieval_result")
