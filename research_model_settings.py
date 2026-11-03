@@ -2,7 +2,7 @@
 import os
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
-
+#统一读取提供商、模型和密钥配置，创建模型客户端
 
 @dataclass(frozen=True)
 class ResearchModelSettings:

@@ -1,6 +1,7 @@
 """Recover only closed, validated answer records after a length stop.
 
 No suffix completion, sentence repair, model calls or semantic verification.
+即如果输出因达到token上限被截断，尝试恢复完整、可验证来源身份的条目
 """
 import json
 
@@ -71,6 +72,7 @@ def complete_items(raw):
     return []
 
 
+#尝试修复已经完整闭合的答案条目，如返回三个数据段，第三个段只返回了一半，那就只保留前两个数据段
 def recover_final(response, seen, paper_mode=True):
     from deep_research import _prepare_final_contract, WorkflowStop
     if response.get("parse_error") != "output_token_limit" or response.get("output_budget_exceeded"):

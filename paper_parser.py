@@ -38,7 +38,7 @@ def _normalise_margin_line(text: str) -> str:
     text = re.sub(r"\d+", "#", text.lower())
     return re.sub(r"\s+", " ", text).strip()
 
-
+#提取全文和行页码映射
 def extract_text_from_bytes(data: bytes) -> tuple[str, list[int]]:
     """Extract PDF text while removing repeated top and bottom margin noise."""
     doc = fitz.open(stream=data, filetype="pdf")
@@ -107,7 +107,8 @@ def _heading_keyword(text: str) -> str | None:
             return keyword
     return None
 
-
+#检测论文章节
+"""章节识别主要依靠标题规则，由程序处理，不规范论文可能识别错误"""
 def detect_sections(
     text: str,
     line_pages: list[int] | None = None,
@@ -159,7 +160,7 @@ def detect_sections(
     flush()
     return sections, section_pages
 
-
+#将长文本切分成适合向量化的“块”
 def chunk_sections(
     sections: dict[str, str],
     section_pages: dict[str, list[int]] | None = None,

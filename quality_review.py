@@ -3,6 +3,8 @@
 import json
 import re
 import hashlib
+#辅助审阅 对已回答提出疑点
+#该类用于实现已完成输出的辅助审阅 可选 即对已输出回答提出疑点并检查其来源，同时不触发循环重写
 
 
 def locate_quote(text, quote):

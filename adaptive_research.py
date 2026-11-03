@@ -1,7 +1,11 @@
-"""Deterministic mode selection and public response projection.
+"""
+选择并组织问答路径，这次请求走哪条路
+确定性模式选择和公共响应预测。
+语言模型不会决定是选择完整的论文还是RAG证据。服务器会根据明确的源数量和字符预算来做出选择。
 
-The language model never decides whether it receives a full paper or RAG
-evidence.  The server chooses from explicit source count and character budget.
+全文路径
+RAG路径->deep_research.py：规划、检索、评估、补差、回答
+通用知识路径
 """
 
 from __future__ import annotations
@@ -58,6 +62,7 @@ class ModeDecision:
     full_context_eligible: bool = False
 
 
+#全文关键词语录
 GLOBAL_SCOPE_MARKERS = (
     "总结", "概述", "综述", "整体", "全文", "主要贡献", "核心贡献", "全部局限",
     "优缺点", "完整架构", "系统比较", "全面比较", "全面讲解", "整体讲解",
@@ -66,9 +71,10 @@ GLOBAL_SCOPE_MARKERS = (
 )
 
 
+#根据关键词规则判断问题像整体问题还是局部问题
 def classify_question_scope(question: str) -> str:
-    normalized = re.sub(r"\s+", " ", (question or "").strip().lower())
-    return "global" if any(marker in normalized for marker in GLOBAL_SCOPE_MARKERS) else "local"
+    normalized = re.sub(r"\s+", " ", (question or "").strip().lower())  #清晰文本
+    return "global" if any(marker in normalized for marker in GLOBAL_SCOPE_MARKERS) else "local"    #关键词匹配 返回结果
 
 
 def _paper_stats(papers: Iterable[list[dict]]) -> tuple[list[list[dict]], int, int]:
@@ -86,31 +92,39 @@ def _paper_stats(papers: Iterable[list[dict]]) -> tuple[list[list[dict]], int, i
     return materialized, total_chars, total_chunks
 
 
+#结合问题、论文大小、用户策略等，选择实际运行模式（通用知识、RAG或全文）
 def select_research_mode(
     papers: Iterable[list[dict]], *, question: str = "", strategy: str = "deep",
     policy: AdaptivePolicy | None = None,
 ) -> ModeDecision:
     """Select from source size, coarse question scope and explicit user strategy."""
 
+    #参数校验
     policy = policy or AdaptivePolicy()
     if strategy not in {"auto", "fast", "deep"}:
         raise ValueError("unsupported_strategy")
+    #统计论文数据（总字符 总块数），使用_paper_stats函数
     materialized, total_chars, total_chunks = _paper_stats(papers)
     paper_count = len(materialized)
+    #先按关键词分类问题是局部还是整体 classify_question_scope函数
     scope = classify_question_scope(question) if paper_count else "not_applicable"
+    #token消耗估计，估计处走全文模式需要消耗多少token
     estimated_full = math.ceil(
         (total_chars + total_chunks * 80) / policy.full_context_chars_per_token
     ) + policy.full_context_prompt_reserve_tokens if paper_count else 0
+    #成本性价比计算，计算全文模式估算token与RAG模式预估token的比值
     ratio = (
         estimated_full / policy.estimated_rag_input_tokens
         if estimated_full else 0.0
     )
+    #全文模式资格预审（硬性条件拦截）
     eligible = (
-        paper_count == 1
-        and total_chars <= policy.full_context_max_chars
-        and total_chunks <= policy.full_context_max_chunks
+        paper_count == 1    #单篇限制
+        and total_chars <= policy.full_context_max_chars    #总字符数限制
+        and total_chunks <= policy.full_context_max_chunks  #总块数限制
     )
 
+    #内部工厂函数：统一结果封装
     def decision(mode: str, reason: str) -> ModeDecision:
         return ModeDecision(
             mode, reason, paper_count, total_chars, total_chunks,
@@ -121,6 +135,7 @@ def select_research_mode(
             full_context_eligible=eligible,
         )
 
+    #硬性规则拦截（优先级最高）
     if paper_count == 0:
         return decision("general", "no_paper_selected")
     if paper_count > 1:
@@ -129,10 +144,12 @@ def select_research_mode(
         return decision("paper_deep", "paper_exceeds_full_context_budget")
     if total_chunks > policy.full_context_max_chunks:
         return decision("paper_deep", "paper_exceeds_full_context_chunk_limit")
+    #用户显示指令（优先级次之）
     if strategy == "fast":
         return decision("paper_deep", "user_selected_fast")
     if strategy == "deep":
         return decision("paper_full", "user_selected_deep")
+    #智能自适应决策（优先级最低，但最智能）：说明前面都没有错，且用户未显示指定fast或deep
     if scope == "global" and ratio <= policy.max_auto_full_to_rag_ratio:
         return decision("paper_full", "auto_global_question_within_cost_guard")
     if scope == "global":
@@ -140,25 +157,31 @@ def select_research_mode(
     return decision("paper_deep", "auto_local_question_prefers_rag")
 
 
+#拼接论文快 按页序组织成全文材料
 def build_full_paper_context(rows: list[dict], *, max_chars: int) -> tuple[str, list[dict]]:
     """Build complete, citation-addressable context or fail without truncation."""
 
+    #严格预算校验
     if max_chars <= 0:
         raise ValueError("full_context_budget_exceeded")
+    #调用sorted()对块列表进行多级排序
     ordered = sorted(
         rows,
         key=lambda row: (
-            row.get("page_start", 0) or 0,
-            row.get("_order", 0) or 0,
-            str(row.get("id") or ""),
+            row.get("page_start", 0) or 0,  #优先按起始页码升序
+            row.get("_order", 0) or 0,  #次优先按入库顺序升序
+            str(row.get("id") or ""),   #最后按ID字符串升序（兜底）
         ),
     )
+    #预算超限检查
     if sum(len(row.get("content", "")) for row in ordered) > max_chars:
         raise ValueError("full_context_budget_exceeded")
 
+    #按页码排序
     evidence: list[dict[str, Any]] = []
     labels: list[str] = []
     seen_ids: set[str] = set()
+    #遍历进行数据清洗与校验
     for row in ordered:
         chunk_id = row.get("id")
         content = row.get("content")
@@ -166,22 +189,26 @@ def build_full_paper_context(rows: list[dict], *, max_chars: int) -> tuple[str, 
             raise ValueError("invalid_or_duplicate_chunk_id")
         if not isinstance(content, str) or not content.strip():
             raise ValueError("invalid_paper_chunk")
-        section = str(row.get("section") or "unknown")[:120]
+        section = str(row.get("section") or "unknown")[:120]    #截断章节名到120字符
         page_start = row.get("page_start") or 0
         page_end = row.get("page_end") or page_start
         if not isinstance(page_start, int) or not isinstance(page_end, int):
             raise ValueError("invalid_page_metadata")
+        #清洗完成，构建清洗过的块和引用标签
         item = {
             "id": chunk_id,
             "section": section,
             "page_start": page_start,
             "page_end": page_end,
             "text": content,
+            #生成指纹
             "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         }
         evidence.append(item)
+        # 构建可以追溯的引用标签
         labels.append(f"[{chunk_id} | {section} | p.{page_start}-{page_end}]\n{content}")
         seen_ids.add(chunk_id)
+    #返回双份数据，前者是字符串格式（便于人阅读），后者是结构化数据（便于程序处理和后续分析）
     return "\n\n".join(labels), evidence
 
 
@@ -197,14 +224,15 @@ PUBLIC_RESULT_FIELDS = (
 )
 
 
+#从完整运行结果中挑出可以返回用户的字段
 def public_research_result(result: dict) -> dict:
     """Return only fields useful to an end user; operational data stays private."""
 
-    public = {name: result.get(name) for name in PUBLIC_RESULT_FIELDS}
+    public = {name: result.get(name) for name in PUBLIC_RESULT_FIELDS}  #对其中字段进行处理，保留部分字段
     for name in ("sources", "unresolved", "caveats"):
         if public[name] is None:
             public[name] = []
-    if public["status"] in {"stopped", "error"}:
+    if public["status"] in {"stopped", "error"}:    #如果状态是停止或错误，则返回提示信息
         public["answer"] = "本次分析未能完成，暂时没有可核验的论文结论。"
         public["suggestion"] = {
             "provider_quota_exhausted": "模型服务额度不足，请联系管理员补充额度或切换可用模型后再试。",
@@ -216,6 +244,7 @@ def public_research_result(result: dict) -> dict:
     return public
 
 
+#记录模式选择及其原因到Trace中
 def _record_mode_selection(trace_dir: Path | None, result: dict, decision: ModeDecision,
                            request_context: dict | None = None) -> None:
     if trace_dir is None:
@@ -255,6 +284,7 @@ def _record_mode_selection(trace_dir: Path | None, result: dict, decision: ModeD
     target.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+#新版总入口：选择路径，再执行全文、RAG或通用问答
 def run_adaptive_research(
     question: str,
     thread_id: str,
@@ -284,7 +314,7 @@ def run_adaptive_research(
         _save_private_trace,
         run_deep_research,
     )
-
+    #参数校验
     policy = policy or AdaptivePolicy()
     if answer_depth not in {"beginner", "concise", "advanced"}:
         raise ValueError("unsupported_answer_depth")
@@ -292,7 +322,9 @@ def run_adaptive_research(
         raise ValueError("unsupported_history_mode")
     if explanation_pipeline not in {"direct", "structured"}:
         raise ValueError("unsupported_explanation_pipeline")
+    #历史上下文处理（防御性编程）
     conversation_history = [] if history_mode == "fresh" else list(conversation_history or [])[-4:]
+    #构建请求指纹（可追溯性与缓存友好），构建request_context
     request_context = {
         "history_mode": history_mode,
         "history_request_ids": [row.get("request_id") for row in conversation_history],
@@ -303,15 +335,17 @@ def run_adaptive_research(
         "answer_depth": answer_depth,
         "explanation_pipeline": explanation_pipeline,
     }
-    papers = [paper_rows] if paper_rows else []
-    decision = select_research_mode(
+    papers = [paper_rows] if paper_rows else [] #实际论文chunk
+    #核心决策：选择研究模式
+    decision = select_research_mode(    #该方法结合多方面因素选择实际运行模式
         papers, question=question, strategy=strategy, policy=policy
     )
     if explanation_pipeline == "structured" and (decision.mode != "paper_full" or answer_depth != "advanced"):
         raise ValueError("structured_requires_full_paper_and_advanced")
 
+    #如果mode是RAG/通用，则调用deep_research.py的run_deep_research()
     if decision.mode in {"general", "paper_deep"}:
-        result = run_deep_research(
+        result = run_deep_research( #调转枪头，对RAG和通用直接扔给该方法
             question,
             thread_id,
             retriever,
@@ -328,7 +362,7 @@ def run_adaptive_research(
         result["mode_reason"] = decision.reason
         result["strategy"] = strategy
         result["answer_depth"] = answer_depth
-        result["deep_retry_recommended"] = bool(
+        result["deep_retry_recommended"] = bool(    #建议用户可以手动选择全文复核
             decision.mode == "paper_deep"
             and strategy == "auto"
             and decision.full_context_eligible
@@ -338,7 +372,8 @@ def run_adaptive_research(
             "当前答案被模型标记为仍有未解决项；如需全文复核，可手动选择 deep。"
             if result["deep_retry_recommended"] else None
         )
-        _record_mode_selection(trace_dir, result, decision, request_context)
+        _record_mode_selection(trace_dir, result, decision, request_context)    #记录trace方法
+        #自动降级回退
         if (decision.mode == "paper_deep" and strategy == "auto"
                 and allow_full_fallback and decision.full_context_eligible
                 and result.get("status") in {"insufficient", "partial"}):
@@ -366,6 +401,7 @@ def run_adaptive_research(
                 | set(prior.get("evidence_ids") or [])
             )
             fallback["unique_evidence_ids"] = len(fallback["evidence_ids"])
+            #指标合并，计算总消耗token、时间等指标
             for name in ("input_tokens", "output_tokens"):
                 if fallback.get(name) is None or prior.get(name) is None:
                     fallback[name] = None
@@ -376,6 +412,7 @@ def run_adaptive_research(
             fallback["fallback_reason"] = prior.get("stop_reason")
             fallback["strategy"] = "auto"
             fallback["mode_reason"] = "auto_rag_partial_fallback_to_full"
+            #轨迹处理
             _merge_fallback_trace(trace_dir, fallback, prior)
             _mark_trace_superseded(trace_dir, prior.get("request_id"), fallback["request_id"])
             return fallback
@@ -384,10 +421,12 @@ def run_adaptive_research(
 
     started = clock()
     request_id = str(uuid.uuid4())
-    context, evidence = build_full_paper_context(
+    #执行全文模式（Paper Full） context:带标签的论文长文本，稍后放进模型输入  evidence:每块的ID,章节，页码，原文和指纹，供引用检查及trace使用
+    context, evidence = build_full_paper_context(   #组装论文文本
         paper_rows or [], max_chars=(min(policy.full_context_max_chars, 100_000)
                                     if explanation_pipeline == "structured" else policy.full_context_max_chars)
     )
+    #初始化追踪轨迹，构建一个记录字典，记录模式选择的原因、提供的论据片段信息以及调用和token计数器，便于后续deep_research.py的_sage_private_trace方法使用
     trace: dict[str, Any] = {
         "request_context": request_context,
         "request_id": request_id,
@@ -436,6 +475,7 @@ def run_adaptive_research(
                               "max_input_chars_per_call": 120000, "max_total_input_chars": 240000,
                               "deadline_seconds": 120, "max_retries": 0},
     }
+    #兜底默认值设定
     status = "stopped"
     stop_reason = "not_started"
     answer = "本次研究未能安全完成，请查看停止原因；当前没有可核验的论文结论。"
@@ -445,16 +485,20 @@ def run_adaptive_research(
     caveats: list[str] = []
     sources: list[dict] = []
 
+    #核心模型调用封装
     def full_call(stage, payload, output_limit):
         from deep_research_runtime import AliyunResearchModel
+        #检查剩余时间和调用次数
         remaining_seconds = 120 - (clock() - started)
         if remaining_seconds <= 0:
             raise WorkflowStop("deadline")
         if trace["model_calls"] >= trace["generation_limits"]["max_calls"]:
             raise WorkflowStop("model_call_budget")
         timeout = min(60.0, remaining_seconds)
+        #在本地构造请求元数据
         describe = getattr(model, "describe_call", None) or AliyunResearchModel.describe_request
         meta = describe(stage, payload, max_output_tokens=output_limit, timeout_seconds=timeout)
+        #检查输入预算
         size = meta["serialized_input_chars"]
         if size > 120000 or trace["external_payload_chars"] + size > 240000:
             raise WorkflowStop("serialized_input_budget")
@@ -462,10 +506,11 @@ def run_adaptive_research(
         trace["events"].append(event)
         trace["model_calls"] += 1
         trace["external_payload_chars"] += size
+        #调用模型并处理响应
         try:
             response = model.call(stage, payload, max_output_tokens=output_limit, timeout_seconds=timeout)
         except Exception as exc:
-            add_usage(trace, {})
+            add_usage(trace, {})    #记录”用量缺失“，因为异常通常拿不到token的使用量
             event.update(error_type=type(exc).__name__, parse_error="model_call_failed")
             failure = AliyunResearchModel.failure_metadata(exc)
             event.update(failure)
@@ -485,6 +530,7 @@ def run_adaptive_research(
                      parse_error=response.get("parse_error"), finish_reason=response.get("finish_reason"),
                      output_budget_exceeded=response.get("output_budget_exceeded"),
                      output_limit_reached=response.get("output_limit_reached"))
+        #抢救已生成答案！！！（大概意思是如果到了最终阶段，即使超时或回答不全面，也保留回答，但要还是在中间阶段，则丢弃回答）
         if clock() - started > 120:
             if (stage in {"full_context", "structured_context"}
                     and not response.get("output_budget_exceeded")
@@ -496,27 +542,32 @@ def run_adaptive_research(
                 trace["events"].append({"step": "late_final_response", "extra_model_calls": 0})
             else:
                 raise WorkflowStop("deadline")
+        #抢救被截断的最终输出！！！（如输出token用完而返回半截JSON），
         if response.get("parse_error") or response.get("data") is None:
             if stage in {"full_context", "structured_context"}:
                 from partial_output import recover_final
-                recovered, recovery = recover_final(response, {row["id"]: row for row in evidence})
+                recovered, recovery = recover_final(response, {row["id"]: row for row in evidence}) #调用partial_output.py的recover_final()尝试修复
                 if recovery is not None:
                     trace["output_recovery"] = recovery
                     trace["events"].append({"step": "output_recovery", **recovery})
                 if recovered is not None:
                     return recovered
             raise WorkflowStop(str(response.get("parse_error") or "invalid_model_response"))
-        return response["data"]
+        return response["data"] #所以full_call()返回的不是整个响应，而是解析后的业务数据
 
     try:
         brief = None
+        #采取结构化资料表的形式
         if explanation_pipeline == "structured":
             from paper_structure import validate_structure, compact_source_context
+            #压缩证据并生成别名
             compact_context, aliases = compact_source_context(evidence)
             trace["structure_source_aliases"] = aliases
             try:
+                #第一次模型调用并提取结构
                 extracted = full_call("source_structure", {"paper_context": compact_context,
                                       "question": question, "answer_depth": answer_depth}, 2200)
+                #程序校验结构资料，调用validate_structure()
                 brief, checks = validate_structure(extracted, evidence, aliases)
                 trace["structure_checks"] = checks
                 trace["reading_brief_candidate"] = brief
@@ -526,6 +577,7 @@ def run_adaptive_research(
                 trace["reading_brief"] = brief
                 if brief is None:
                     trace.setdefault("structure_fallback_reason", checks["reason"])
+            #结构提取失败时是否继续
             except WorkflowStop as exc:
                 trace["structure_fallback_reason"] = exc.reason
                 if exc.reason in {"provider_quota_exhausted", "provider_request_rejected",
@@ -534,19 +586,23 @@ def run_adaptive_research(
             trace["events"].append({"step": "structure_validation", "brief": brief,
                                     "checks": trace.get("structure_checks"),
                                     "fallback_reason": trace.get("structure_fallback_reason")})
+        #构造最终写作输入，无论direct还是structured
         payload = {"paper_context": context, "conversation": conversation_history,
                    "question": question, "answer_depth": answer_depth}
+        #如果结构资料则用
         if brief is not None:
             payload["reading_brief"] = brief
+        #调用大模型
         data = full_call("structured_context" if brief is not None else "full_context", payload,
                          FULL_PAPER_OUTPUT_LIMITS[answer_depth])
         seen = {item["id"]: item for item in evidence}
         from deep_research import _prepare_final_contract
-        final, coverage, caveats, structured = _prepare_final_contract(
+        """这里验证的是格式和来源身份，不代表程序已经证明论点在语义上完成正确"""
+        final, coverage, caveats, structured = _prepare_final_contract(  #该函数检查多项格式和来源，丢弃不合规条目
             data, [{"id": "q1", "text": question}], seen, True, trace
         )
-        answer, claims, unresolved = _render_final(final, seen, True)
-        sources = _build_public_sources(claims, seen)
+        answer, claims, unresolved = _render_final(final, seen, True)   #渲染成人类可读答案
+        sources = _build_public_sources(claims, seen)   #生成公开来源列表
         if trace.get("output_recovery", {}).get("retained_items", 0):
             from partial_output import TRUNCATION_NOTICE
             unresolved = [TRUNCATION_NOTICE]
@@ -581,6 +637,7 @@ def run_adaptive_research(
             "step": "finish", "stop_reason": stop_reason, "error_type": type(exc).__name__,
         })
 
+    #可选的一次质量审查
     quality_report = review_once(
         model, question, answer, evidence, trace,
         enabled=enable_quality_review and explanation_pipeline != "structured"
@@ -588,6 +645,7 @@ def run_adaptive_research(
         and not trace.get("late_final_response")
         and status in {"ok", "ok_with_limits", "partial", "insufficient"},
     )
+    #完成trace并写入磁盘
     trace["cached_tokens"] = cache_total(trace)
     brief_used = bool(trace.get("reading_brief")) and any(
         event.get("stage") == "structured_context" for event in trace["events"])
@@ -609,6 +667,7 @@ def run_adaptive_research(
         "elapsed_ms": round((clock() - started) * 1000, 2),
     })
     _save_private_trace(trace, trace_dir)
+    #构造工作流内部返回值
     return {
         "request_id": request_id,
         "mode": decision.mode,

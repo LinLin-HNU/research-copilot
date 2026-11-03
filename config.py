@@ -1,4 +1,4 @@
-"""Shared generation configuration for legacy chat and research endpoints."""
+"""加载统一配置，借助统一工厂创建旧路径使用的模型对象"""
 from dotenv import load_dotenv
 from research_model_settings import build_chat_model
 from pathlib import Path

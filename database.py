@@ -148,6 +148,7 @@ def list_sessions()->list[dict]:
     conn.close()
 
 
+#查询某会话（thread_id）是否存在
 def session_exists(thread_id: str) -> bool:
   """Return whether the server already knows this single-user local thread."""
   conn=get_db_connection()

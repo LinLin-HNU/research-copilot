@@ -1,7 +1,14 @@
-"""Local-only runtime adapter and admission guard for deep research.
+"""
+模型调用适配与入口保护
+仅本地运行时适配器和深度研究的准入保护。
+它包含两件事：
+一件式研究入口的访问和费用约束
+另一件是与真实生成模型通信
 
-The pure workflow in ``deep_research.py`` stays independently testable.  This
-module owns the paid model connection and process-local usage limits.
+新版的分阶段提示词主要在这里，不全在 prompts.py
+
+“deep_research.py”中的纯工作流程保持独立测试。 就是这样
+模块拥有付费模型连接和进程-本地使用限制。
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from deep_research import WorkflowStop
 from research_model_settings import resolve_research_model, build_chat_model
 
 
+#定义类：异常处理
 class ResearchAccessError(Exception):
     def __init__(self, status_code: int, detail: str):
         super().__init__(detail)
@@ -30,6 +38,7 @@ class ResearchAccessError(Exception):
         self.detail = detail
 
 
+#定义类（研究入口的访问和费用约束）：管理入口token、请求频率、并发和用量等约束
 class ResearchAccessGuard:
     """Single-process token auth, rate limit, concurrency and token reservation."""
 
@@ -51,7 +60,7 @@ class ResearchAccessGuard:
         self._max_concurrent = max_concurrent
         self._clock = clock
         self._lock = threading.Lock()
-        self._recent: deque[float] = deque()
+        self._recent: deque[float] = deque()    #队列 记录请求时间
         self._day = self._day_key(clock())
         self._charged_tokens = 0
         self._reservations: dict[str, int] = {}
@@ -60,50 +69,56 @@ class ResearchAccessGuard:
     def _day_key(timestamp: float) -> int:
         return int(timestamp // 86_400)
 
+    #跨天重置所消耗的token
     def _roll_day(self, now: float) -> None:
         day = self._day_key(now)
         if day != self._day:
             self._day = day
             self._charged_tokens = 0
 
+    #检查入口token
     def authenticate(self, supplied: str | None) -> None:
         if not supplied or not hmac.compare_digest(supplied, self._token):
             raise ResearchAccessError(401, "深度研究令牌无效")
 
+    #检查是否允许开始请求（检查并限制资源和清理信息），并在检查通过后预留运行名额
     def begin(self, supplied: str | None, confirmed: bool) -> str:
         self.authenticate(supplied)
         if not confirmed:
             raise ResearchAccessError(400, "必须显式确认本次问题与论文证据将发送到阿里云接口")
         now = self._clock()
         with self._lock:
-            self._roll_day(now)
-            while self._recent and self._recent[0] <= now - 3600:
+            self._roll_day(now) #跨天重置所消耗的token
+            while self._recent and self._recent[0] <= now - 3600:   #清理过期请求
                 self._recent.popleft()
-            if len(self._reservations) >= self._max_concurrent:
+            if len(self._reservations) >= self._max_concurrent: #检查并发
                 raise ResearchAccessError(429, "已有深度研究请求正在运行，请稍后再试")
-            if len(self._recent) >= self._max_requests_per_hour:
+            if len(self._recent) >= self._max_requests_per_hour:    #检查请求
                 raise ResearchAccessError(429, "已达到每小时深度研究次数上限")
-            reserved = sum(self._reservations.values())
+            reserved = sum(self._reservations.values()) #检查预算
             if self._charged_tokens + reserved + self._token_reservation > self._max_tokens_per_day:
                 raise ResearchAccessError(429, "已达到本机实验的每日 Token 预算")
-            reservation_id = str(uuid.uuid4())
+            reservation_id = str(uuid.uuid4())  #放行并预留
             self._reservations[reservation_id] = self._token_reservation
             self._recent.append(now)
             return reservation_id
 
+    #请求结束后释放begin预留的名额并记录用量
     def finish(self, reservation_id: str, actual_tokens: int | None) -> None:
         with self._lock:
-            reserved = self._reservations.pop(reservation_id, None)
+            reserved = self._reservations.pop(reservation_id, None) #释放名额
             if reserved is None:
                 return
             charged = actual_tokens if isinstance(actual_tokens, int) and actual_tokens >= 0 else reserved
-            self._charged_tokens += charged
+            self._charged_tokens += charged #累加记录该次请求消耗的token
 
+    #请求未正常开始或失败时取消预留（在begin后和finish前，如遇到网络问题不正常退出）
     def cancel(self, reservation_id: str) -> None:
         """Release a reservation when execution failed before a result existed."""
         with self._lock:
             self._reservations.pop(reservation_id, None)
 
+    #获取当前状态快照
     def snapshot(self) -> dict:
         now = self._clock()
         with self._lock:
@@ -121,6 +136,7 @@ class ResearchAccessGuard:
             }
 
 
+#该类用于加载研究入口的那个token和配置基础的研究入口（如每小时最多请求数：4，每天最大token：150000，等等）
 def load_research_guard() -> ResearchAccessGuard:
     load_dotenv(Path(__file__).parent / ".env")
     token = os.getenv("DEEP_RESEARCH_API_TOKEN", "")
@@ -138,6 +154,8 @@ def load_research_guard() -> ResearchAccessGuard:
         raise ResearchAccessError(503, f"深度研究入口配置错误：{exc}") from exc
 
 
+#定义类（与真实生成模型通信）：工作流使用的模型适配对象；虽然名字保留Aliyun，实际连接由统一配置决定
+#主要作用：把怎样访问模型封装起来，工作流只需要知道“现在需要做什么”
 class AliyunResearchModel:
     """At most three no-retry JSON calls, bounded by the pure workflow."""
 
@@ -147,10 +165,12 @@ class AliyunResearchModel:
         self._key = self._settings.api_key
         self._base = self._settings.base_url
 
+    #接收工作流传来的业务参数，并调用describe_request方法补齐请求格式，后转给真正的执行方法
     def describe_call(self, stage, payload, *, max_output_tokens, timeout_seconds):
         return self.describe_request(stage, payload, max_output_tokens=max_output_tokens,
                                      timeout_seconds=timeout_seconds, settings=self._settings)
 
+    #为规划、评估、最终写作等阶段提供不同提示词
     @staticmethod
     def _instruction(stage: str) -> str:
         instructions = {
@@ -264,6 +284,7 @@ class AliyunResearchModel:
             )
         return instructions[stage]
 
+    #把本阶段的问题、证据等组织成请求内容发给大模型
     @staticmethod
     def _build_user_content(stage: str, payload: dict) -> str:
         if stage not in {"full_context", "source_structure", "structured_context"}:
@@ -277,7 +298,7 @@ class AliyunResearchModel:
             + json.dumps(payload.get("conversation") or [], ensure_ascii=False)
             + "\n\n【本轮问题】\n" + str(payload.get("question") or "")
         )
-
+    #接收上层传来的参数，组件一个请求字典，共调用大模型使用
     @classmethod
     def describe_request(cls, stage, payload, *, max_output_tokens, timeout_seconds, settings=None):
         settings = settings or resolve_research_model(require_key=False)
@@ -293,6 +314,7 @@ class AliyunResearchModel:
                 "temperature": 0, "max_retries": 0, "enable_thinking": False,
                 "max_output_tokens": max_output_tokens, "timeout_seconds": timeout_seconds}
 
+    #以下两个方法：解析模型文字，并包装为工作流使用的统一结果
     @staticmethod
     def _parse_json(raw: str) -> dict:
         text = raw.strip()
@@ -375,6 +397,7 @@ class AliyunResearchModel:
             "provider_usage": token_usage,
         }
 
+    #真实调用外部生成模型，返回用量及结果信息
     def call(self, stage: str, payload: dict, *, max_output_tokens: int,
              timeout_seconds: float) -> dict:
         from langchain_core.messages import HumanMessage, SystemMessage

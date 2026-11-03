@@ -1,7 +1,7 @@
 """Validate a source-bound reading brief; this does not verify its semantics."""
 
 from quality_review import locate_quote
-
+#该类主要用于处理结构化资料表，为结构化资料表缩短来源标记、校验格式与来源
 
 def compact_source_context(evidence):
     """Request-local aliases shorten output without changing source text."""

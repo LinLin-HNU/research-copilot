@@ -91,6 +91,7 @@ async def download_from_oss(url: str) -> bytes:
         return resp.content
 
 
+#接收本地PDF，组织解析、分块、向量入库和会话创建
 @app.post("/research/import")
 async def import_research_pdf(
     request: Request,
@@ -110,40 +111,45 @@ async def import_research_pdf(
     declared_size = request.headers.get("content-length")
     if declared_size and (not declared_size.isdigit() or int(declared_size) > MAX_LOCAL_PDF_BYTES):
         raise HTTPException(status_code=413, detail="PDF 不得超过 25 MB")
-    data = bytearray()
-    async for part in request.stream():
+    #流式读取论文并检查论文大小
+    data = bytearray()  #创建一个空的、可以不断追加内容的二进制容器
+    async for part in request.stream(): #前端传来的论文放在请求体中
         data.extend(part)
         if len(data) > MAX_LOCAL_PDF_BYTES:
             raise HTTPException(status_code=413, detail="PDF 不得超过 25 MB")
     if not data.startswith(b"%PDF-"):
         raise HTTPException(status_code=400, detail="文件内容不是有效的 PDF")
 
+    #核心处理逻辑
     def parse_and_index():
+        #PDF解析与分块
         try:
-            full_text, line_pages = extract_text_from_bytes(bytes(data))
-            sections, section_pages = detect_sections(full_text, line_pages)
-            chunks = chunk_sections(sections, section_pages)
+            full_text, line_pages = extract_text_from_bytes(bytes(data))    #提取全文和行页码映射
+            sections, section_pages = detect_sections(full_text, line_pages)    #检测论文章节
+            chunks = chunk_sections(sections, section_pages)    #将长文本切分成适合向量化的“块”
         except Exception as exc:
             raise ValueError("pdf_parse_failed") from exc
         if not chunks:
             raise ValueError("no_readable_paper_text")
+        #标题提取与清洗
         supplied_name = Path(unquote(x_paper_filename or "").replace("\\", "/")).name
         if supplied_name.lower().endswith(".pdf"):
             stem = re.sub(r"^\d{4}[_ -]+", "", supplied_name[:-4])
             title = re.sub(r"\s+", " ", stem.replace("_", " ")).strip()[:100]
         else:
             title = ""
-        title = title or guess_title(full_text)
+        title = title or guess_title(full_text) #如果文件名不可用，调用guess_title()函数
+        #创建thread_id
         thread_id = str(uuid.uuid4())
         rag = get_rag()
         try:
-            # This calls the configured embedding provider; no generation call is made.
-            rag.store(thread_id, chunks, title)
-            create_session(thread_id, title)
+            # 转换成向量后存储和创建sqlite会话
+            rag.store(thread_id, chunks, title) #建立论文索引
+            create_session(thread_id, title)    #创建SQLite会话
         except Exception:
             try:
-                rag.delete_collection(thread_id)
-            except Exception:
+                rag.delete_collection(thread_id)    #尝试清理本次Chroma中的论文库
+            except Exception:   #清理如果失败则记录异常日志
                 logger.exception("Could not clean up failed import %s", thread_id)
             raise
         return {
@@ -592,13 +598,14 @@ async def chat(request: ChatRequest, fastapi_req: Request):
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-
+#直接进入受控研究流程的接口（在网页中手动选择RAG，不经过完整的自适应选择入口即agaptive_research_endpoint()）
 @app.post("/research/deep")
 async def deep_research_endpoint(
     payload: DeepResearchRequest,
     x_research_token: str | None = Header(default=None),
 ):
     """Run one explicitly confirmed, local-only, bounded research experiment."""
+    #身份验证与状态校验（安全防线）
     try:
         guard = get_research_guard()
         # Authenticate before checking thread existence to avoid exposing local IDs.
@@ -606,8 +613,8 @@ async def deep_research_endpoint(
         if payload.mode == "paper_deep" and (
             not payload.thread_id or not session_exists(payload.thread_id)
         ):
-            raise HTTPException(status_code=404, detail="未找到对应论文会话")
-        reservation_id = guard.begin(
+            raise HTTPException(status_code=404, detail="未找到对应论文会话")    #历史会话不存在返回404
+        reservation_id = guard.begin(   #资源预留
             x_research_token,
             payload.confirm_external_processing,
         )
@@ -661,42 +668,44 @@ async def deep_research_endpoint(
     }
     return result
 
-
+#新版问答入口，准备论文、历史、检索对象和模型，然后调用自适应工作流
 @app.post("/research/adaptive")
 async def adaptive_research_endpoint(
     payload: AdaptiveResearchRequest,
     x_research_token: str | None = Header(default=None),
 ):
     """Run auto-selected general, full-paper or bounded-RAG research."""
+    #鉴权与状态校验（安全防线-鉴权）
     try:
-        guard = get_research_guard()
-        guard.authenticate(x_research_token)
+        guard = get_research_guard()    #安全入口 调load_research_graud()，返回类ResearchAssessGrard，包含token和资源限制
+        guard.authenticate(x_research_token)    #身份验证
         if payload.thread_id and not session_exists(payload.thread_id):
-            raise HTTPException(status_code=404, detail="未找到对应论文会话")
-        reservation_id = guard.begin(
+            raise HTTPException(status_code=404, detail="未找到对应论文会话")    #历史会话不存在返回404
+        reservation_id = guard.begin(   #资源预留，预留_id
             x_research_token,
             payload.confirm_external_processing,
         )
     except ResearchAccessError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
+    #上下文与依赖准备（构建工作流输入-历史上下文）
     result = None
     try:
         def execute_adaptive():
-            rag = get_rag() if payload.thread_id else None
+            rag = get_rag() if payload.thread_id else None  #RAG检索对象，初始化rag
             rows = rag.list_chunks(payload.thread_id) if rag is not None else None
-            retriever = ChromaPaperRetriever(rag) if rag is not None else None
+            retriever = ChromaPaperRetriever(rag) if rag is not None else None  #retriever是论文检索对象
             conversation = (
-                list_adaptive_turns(payload.thread_id, limit=4)
+                list_adaptive_turns(payload.thread_id, limit=4) #历史对话：拉取最近历史
                 if payload.thread_id and payload.history_mode == "continue" else []
             )
             try:
                 full_context_chars = int(
-                    os.getenv("ADAPTIVE_FULL_CONTEXT_MAX_CHARS", "100000")
+                    os.getenv("ADAPTIVE_FULL_CONTEXT_MAX_CHARS", "100000")  #环境配置，读取环境变量
                 )
             except ValueError as exc:
                 raise RuntimeError("Invalid ADAPTIVE_FULL_CONTEXT_MAX_CHARS") from exc
-            return run_adaptive_research(
+            #异步执行核心工作流（避免阻塞）
+            return run_adaptive_research(   #调用核心，传给adaptive_research.py的run_adaptive_research()函数
                 payload.question,
                 payload.thread_id,
                 rows,
@@ -712,9 +721,10 @@ async def adaptive_research_endpoint(
                                        else os.getenv("RESEARCH_QUALITY_REVIEW", "1").lower() in {"1", "true", "yes"}),
                 trace_dir=ADAPTIVE_TRACE_DIR,
             )
-
-        result = await run_in_threadpool(execute_adaptive)
-    except ValueError as exc:
+        #将同步工作流放到线程池执行，避免阻塞异步循环函数执行
+        result = await run_in_threadpool(execute_adaptive)  #线程池运行，把上面execute_adaptive()放入线程池
+    #异常处理与资源释放
+    except ValueError as exc:   #取消预留，抛出错误则释放预留资源
         guard.cancel(reservation_id)
         raise HTTPException(status_code=400, detail=f"研究配置不适用：{exc}") from exc
     except Exception as exc:
@@ -723,19 +733,19 @@ async def adaptive_research_endpoint(
             status_code=500,
             detail=f"自适应研究运行失败：{type(exc).__name__}",
         ) from exc
-
-    input_tokens = result.get("input_tokens")
+    #计费与结果持久化（后置处理）
+    input_tokens = result.get("input_tokens")   #计费结果，计算实际token消耗
     output_tokens = result.get("output_tokens")
     actual_tokens = (
         input_tokens + output_tokens
         if isinstance(input_tokens, int) and isinstance(output_tokens, int)
         else None
     )
-    guard.finish(reservation_id, actual_tokens)
-    if payload.thread_id and result.get("status") in {
+    guard.finish(reservation_id, actual_tokens) #完成配额扣除或计费记录等操作
+    if payload.thread_id and result.get("status") in {  #保存对话记录
         "ok", "ok_with_limits", "insufficient", "partial"
     }:
-        try:
+        try:    #容错设计，用try...except包裹，防止保存失败
             record_adaptive_turn({
                 "request_id": result["request_id"],
                 "thread_id": payload.thread_id,
@@ -755,6 +765,7 @@ async def adaptive_research_endpoint(
             )
     # Operational metrics remain in the private trace and are intentionally
     # not returned to the end-user response.
+    #返回结果（经整理后方便展示给用户的结果）
     return public_research_result(result)
 
 
@@ -765,18 +776,21 @@ def _authenticate_trace_admin(token: str | None) -> None:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
+#返回管理员页面
 @app.get("/admin/research")
 async def research_trace_page():
     """Serve the shell only; trace data still requires the admin header token."""
     return FileResponse(Path(__file__).parent / "static" / "admin-traces.html")
 
 
+#返回研究页面
 @app.get("/research")
 async def adaptive_research_page():
     """Local pilot UI; the access token stays in page memory only."""
     return FileResponse(Path(__file__).parent / "static" / "research.html")
 
 
+#给管理员提供Trace列表和详情
 @app.get("/admin/research/traces")
 async def list_research_traces(
     limit: int = 50,

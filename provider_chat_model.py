@@ -1,7 +1,7 @@
 """Small Chat Completions adapter; no calls or retries happen on construction."""
 from langchain_openai import ChatOpenAI
 
-
+#适配 DeepSeek 的请求参数差异
 class DeepSeekChatOpenAI(ChatOpenAI):
     """Keep DeepSeek's max_tokens parameter on the serialized request.
 

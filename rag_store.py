@@ -17,13 +17,14 @@ DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 DASHSCOPE_BASE_URL = (os.getenv("DASHSCOPE_BASE_URL") or "").rstrip("/")
 
 
+#调用嵌入服务，将文字转为向量
 def _embed(texts: list[str], timeout_seconds: float | None = None) -> list[list[float]]:      #下划线前缀_embeg，这表示是一个内部函数，仅供本模块内的类使用，不对外暴露
     """调用 DashScope embedding API。接口单批最多 20 条，超出自动分批。"""
     batch_size = 20                                     #DashScope 兼容接口的批次上限
     results: list[list[float]] = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        resp = requests.post(                           #向阿里云的embeddings接口发送post请求
+        resp = requests.post(                           #调用嵌入服务：向阿里云的embeddings接口发送post请求
             f"{DASHSCOPE_BASE_URL}/embeddings",
             headers={
                 "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
@@ -39,6 +40,7 @@ def _embed(texts: list[str], timeout_seconds: float | None = None) -> list[list[
     return results
 
 
+#向量归一化，便于计算余弦相似度
 def _normalize(v: list[float]) -> list[float]:
     norm = math.sqrt(sum(x * x for x in v))
     if norm == 0:
@@ -46,6 +48,7 @@ def _normalize(v: list[float]) -> list[float]:
     return [x / norm for x in v]
 
 
+#计算两个向量的余弦相似度
 def _cos(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
@@ -78,7 +81,7 @@ class PaperRAG:
         )
 
     def store(self, thread_id: str, chunks: list[dict], title: str = "") -> None:
-        """存储论文章节到向量库"""
+        """转换论文文本到向量，并存储论文章节到向量库"""
         collection = self.client.get_or_create_collection(f"paper_{thread_id}")
         texts = [c["content"] for c in chunks]
         embeddings = _embed(texts)
@@ -93,7 +96,7 @@ class PaperRAG:
                 "page_end": c.get("page_end", 0),
             } for c in chunks],
         )
-
+    #查询语义候选，并进行MMR筛选
     def search(self, thread_id: str, query: str, k: int = 5,
                exclude_ids: set | None = None, pool: int = 20, mmr_lambda: float = 0.7,
                timeout_seconds: float | None = None) -> list[dict]:
@@ -175,8 +178,9 @@ class PaperRAG:
 _rag = None
 
 
+#获取PaperRAG全局单例
 def get_rag() -> PaperRAG:
-    global _rag
+    global _rag #避免多次消耗资源、耗时，还贯彻懒加载思想
     if _rag is None:
         _rag = PaperRAG()
     return _rag

@@ -16,6 +16,7 @@ class DeepResearchRequest(BaseModel):
     confirm_external_processing: bool = False
 
 
+#新版请求模型，新版响应模型采用工作流返回字典，接口整理后以JSON返回，没有对应专用的Pydantic响应模型
 class AdaptiveResearchRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     thread_id: str = Field(default="", max_length=200)
